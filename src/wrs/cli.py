@@ -23,9 +23,10 @@ from .case import CaseManager, generate_scan_id
 from .categorizer import ALL_CATEGORIES, CATEGORY_DIR_NAMES
 from .chat import ChatReconstructionEngine, Conversation
 from .database import WhatsAppDatabaseAnalyzer
-from .device import AdbExecutor, DeviceInfo
+from .device import AdbExecutor, DeviceInfo, DeviceStatusResult
 from .discovery import DiscoveredLocation, StorageDiscovery
 from .duplicate import DuplicateDetector
+from .state import RuntimeStateManager
 from .errors import (
     ERR_ADB_NOT_FOUND,
     ERR_DEVICE_DISCONNECTED,
@@ -88,44 +89,67 @@ def print_banner(
     executor: AdbExecutor,
     device: Optional[DeviceInfo] = None,
     settings: Optional[dict[str, Any]] = None,
+    device_status: Optional[DeviceStatusResult] = None,
 ) -> None:
-    """Display professional terminal banner."""
-    adb_ok, adb_msg = executor.get_adb_version()
-    adb_status = f"Available ({adb_msg})" if adb_ok else f"Unavailable ({adb_msg})"
+    """Display authentic terminal banner with independent ADB and Android device statuses."""
     now_str = format_timestamp()
-    env_str = get_environment_name()
 
     mask = False
     if settings and settings.get("ui", {}).get("mask_device_serial"):
         mask = True
 
-    dev_str = "None"
-    if device:
-        s_disp = device.get_display_serial(masked=mask)
-        dev_str = f"{device.display_name} ({s_disp})" if s_disp else device.display_name
+    # 1. Obtain authentic status if not provided
+    status = device_status
+    if status is None:
+        status = executor.check_device_status(selected_serial=device.serial if device else None)
 
-    if HAS_RICH and console:
-        title = Text("WRS — WhatsApp Recovery Scanner", style="bold cyan")
-        subtitle = Text("Forensic Acquisition & Preservation Utility\n", style="dim")
-        body = (
-            f"[bold green]●[/bold green] Environment    : [white]{env_str}[/white]\n"
-            f"[bold blue]●[/bold blue] Processing Mode: [bold]100% Local Execution (Zero Network / Cloud)[/bold]\n"
-            f"[bold cyan]●[/bold cyan] ADB Status      : [white]{adb_status}[/white]\n"
-            f"[bold yellow]●[/bold yellow] Selected Device : [bold white]{dev_str}[/bold white]\n"
-            f"[bold magenta]●[/bold magenta] Version        : [white]v{__version__}[/white] | Timestamp: [white]{now_str}[/white]"
+    # 2. Determine ADB Status string
+    adb_status_str = status.adb_status_display
+
+    # 3. Determine Android Device string
+    if device:
+        if device.is_authorized:
+            device_status_str = f"{device.display_name} (CONNECTED AND AUTHORIZED)"
+        elif device.state == "unauthorized":
+            device_status_str = f"UNAUTHORIZED ({device.get_display_serial(masked=mask)})"
+        elif device.state == "offline":
+            device_status_str = f"OFFLINE ({device.get_display_serial(masked=mask)})"
+        elif device.state in ("disconnected", "unavailable"):
+            device_status_str = f"DISCONNECTED ({device.get_display_serial(masked=mask)})"
+        else:
+            device_status_str = f"{device.state.upper()} ({device.get_display_serial(masked=mask)})"
+    else:
+        device_status_str = status.device_status_display
+
+    top_border = f"╭{'─' * 18} WRS — WhatsApp Recovery Scanner {'─' * 18}╮"
+    bot_border = f"╰{'─' * 12} Forensic Acquisition & Preservation Utility {'─' * 12}╯"
+
+    if HAS_RICH and console and hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+        from rich import box
+        content = (
+            f"[bold cyan]Processing Mode[/bold cyan] : [bold]100% Local Execution[/bold]\n"
+            f"[bold cyan]ADB Status     [/bold cyan] : [bold green]{adb_status_str}[/bold green]\n"
+            f"[bold cyan]Android Device [/bold cyan] : [bold yellow]{device_status_str}[/bold yellow]\n"
+            f"[bold cyan]Version        [/bold cyan] : v{__version__}\n"
+            f"[bold cyan]Timestamp      [/bold cyan] : {now_str}"
         )
-        panel = Panel(body, title=title, subtitle=subtitle, border_style="cyan")
+        panel = Panel(
+            content,
+            title="[bold white]WRS — WhatsApp Recovery Scanner[/bold white]",
+            subtitle="[dim]Forensic Acquisition & Preservation Utility[/dim]",
+            box=box.ROUNDED,
+            border_style="cyan",
+            width=72,
+        )
         console.print(panel)
     else:
-        print("=" * 72)
-        print(f"  WRS — WHATSAPP RECOVERY SCANNER (v{__version__})")
-        print("  Forensic Acquisition & Preservation Utility")
-        print(f"  Environment    : {env_str}")
-        print("  Processing     : 100% Local Execution — Zero Network / Cloud Telemetry")
-        print(f"  ADB Status     : {adb_status}")
-        print(f"  Selected Device: {dev_str}")
-        print(f"  Timestamp      : {now_str}")
-        print("=" * 72)
+        print(top_border)
+        print(f"│ {'Processing Mode : 100% Local Execution':<68} │")
+        print(f"│ {f'ADB Status      : {adb_status_str}':<68} │")
+        print(f"│ {f'Android Device  : {device_status_str}':<68} │")
+        print(f"│ {f'Version         : v{__version__}':<68} │")
+        print(f"│ {f'Timestamp       : {now_str}':<68} │")
+        print(bot_border)
 
 
 def print_screen_header(
@@ -156,48 +180,63 @@ def detect_and_display_startup_devices(
 ) -> Tuple[List[DeviceInfo], Optional[DeviceInfo]]:
     """Perform preflight checks and query ADB.
 
-    Displays environment, ADB status, connected devices count, current time,
-    and a structured device table before returning (all_devices, selected_device).
+    Displays environment, independent ADB and device statuses, connected devices count,
+    current time, and structured device details before returning (all_devices, selected_device).
     """
-    adb_ok, adb_msg = executor.get_adb_version()
-    adb_status = f"Available" if adb_ok else f"Unavailable ({adb_msg})"
+    status = executor.check_device_status()
+    RuntimeStateManager.get_instance().sync_device_status(status)
+
     env_str = get_environment_name()
-    now_str = format_timestamp()
+    now_str = status.timestamp or format_timestamp()
 
     mask = False
     if settings and settings.get("ui", {}).get("mask_device_serial"):
         mask = True
 
-    if not adb_ok:
+    # 1. ADB Missing or Command Error
+    if not status.adb_available:
+        print_banner(executor, settings=settings, device_status=status)
         print("\n" + "=" * 62)
         print("          WRS — WHATSAPP RECOVERY SCANNER")
         print("=" * 62)
         print(f"Environment       : {env_str}")
-        print(f"ADB Status        : {adb_status}")
+        print(f"ADB Status        : {status.adb_status_display}")
         print(f"Connected Devices : 0")
         print(f"Current Time      : {now_str}")
-        print(format_actionable_error(ERR_ADB_NOT_FOUND, context=adb_msg))
+        print(format_actionable_error(ERR_ADB_NOT_FOUND, context=status.adb_version_raw or status.enumeration_error))
         return [], None
 
-    # Enumerate devices
-    raw_devices = executor.list_devices()
-    devices: List[DeviceInfo] = []
-    for d in raw_devices:
-        details = executor.get_device_details(d.serial)
-        devices.append(details)
+    # 2. Enumeration Failed
+    if not status.enumeration_success:
+        print_banner(executor, settings=settings, device_status=status)
+        print("\n" + "=" * 62)
+        print("          WRS — WHATSAPP RECOVERY SCANNER")
+        print("=" * 62)
+        print(f"Environment       : {env_str}")
+        print(f"ADB Status        : {status.adb_status_display}")
+        print(f"Device Listing    : FAILED")
+        print(f"Reason            : {status.enumeration_error}")
+        print(f"Current Time      : {now_str}")
+        print("-" * 62)
+        print("[!] Device enumeration failed. Check ADB daemon or permissions.")
+        print("=" * 62 + "\n")
+        return [], None
 
-    print("\n" + "=" * 62)
-    print("          WRS — WHATSAPP RECOVERY SCANNER")
-    print("=" * 62)
-    print(f"Environment       : {env_str}")
-    print(f"ADB Status        : {adb_status}")
-    print(f"Connected Devices : {len(devices)}")
-    print(f"Current Time      : {now_str}")
-    print("\nCONNECTED ANDROID DEVICES")
-    print("-" * 62)
+    # 3. Successful enumeration
+    devices = status.devices
 
-    # 1. Zero devices connected
+    # 3A. Zero devices connected
     if not devices:
+        print_banner(executor, settings=settings, device_status=status)
+        print("\n" + "=" * 62)
+        print("          WRS — WHATSAPP RECOVERY SCANNER")
+        print("=" * 62)
+        print(f"Environment       : {env_str}")
+        print(f"ADB Status        : {status.adb_status_display}")
+        print(f"Connected Devices : 0")
+        print(f"Current Time      : {now_str}")
+        print("\nCONNECTED ANDROID DEVICES")
+        print("-" * 62)
         print("[!] No authorized Android device detected.\n")
         print("1. Connect the Android phone using USB.")
         print("2. Enable USB debugging.")
@@ -211,9 +250,25 @@ def detect_and_display_startup_devices(
         print("=" * 62 + "\n")
         return [], None
 
-    # 2. Exactly one device connected
+    # 3B. Exactly one device connected
     if len(devices) == 1:
         dev = devices[0]
+        # Query full properties only for authorized device
+        if dev.is_authorized and dev.serial not in executor._device_cache:
+            dev = executor.get_device_details(dev.serial)
+            devices[0] = dev
+
+        print_banner(executor, device=dev, settings=settings, device_status=status)
+        print("\n" + "=" * 62)
+        print("          WRS — WHATSAPP RECOVERY SCANNER")
+        print("=" * 62)
+        print(f"Environment       : {env_str}")
+        print(f"ADB Status        : {status.adb_status_display}")
+        print(f"Connected Devices : 1")
+        print(f"Current Time      : {now_str}")
+        print("\nCONNECTED ANDROID DEVICES")
+        print("-" * 62)
+
         s_id = dev.get_display_serial(masked=mask)
         mfg = dev.manufacturer if dev.manufacturer != "Unknown" else "Unavailable"
         mdl = dev.model if dev.model != "Unknown" else "Unavailable"
@@ -240,8 +295,23 @@ def detect_and_display_startup_devices(
                 print(format_actionable_error(ERR_DEVICE_OFFLINE, device_name=dev.display_name))
             return devices, dev
 
-    # 3. Multiple devices connected
+    # 3C. Multiple devices connected
+    print_banner(executor, settings=settings, device_status=status)
+    print("\n" + "=" * 62)
+    print("          WRS — WHATSAPP RECOVERY SCANNER")
+    print("=" * 62)
+    print(f"Environment       : {env_str}")
+    print(f"ADB Status        : {status.adb_status_display}")
+    print(f"Connected Devices : {len(devices)}")
+    print(f"Current Time      : {now_str}")
+    print("\nCONNECTED ANDROID DEVICES")
+    print("-" * 62)
+
     for idx, d in enumerate(devices, start=1):
+        if d.is_authorized and d.serial not in executor._device_cache:
+            d = executor.get_device_details(d.serial)
+            devices[idx - 1] = d
+
         s_id = d.get_display_serial(masked=mask)
         mfg = d.manufacturer if d.manufacturer != "Unknown" else "Unavailable"
         mdl = d.model if d.model != "Unknown" else "Unavailable"
@@ -686,10 +756,19 @@ def run_interactive_workflow(
     if not dev:
         return
 
-    # Check connection stability
-    if not executor.is_device_connected(dev.serial):
-        print(format_actionable_error(ERR_DEVICE_DISCONNECTED, device_name=dev.display_name))
+    # Check connection stability and revalidate device
+    val_ok, reval_dev, val_msg = executor.revalidate_selected_device(dev.serial)
+    if not val_ok:
+        if not executor.is_device_connected(dev.serial):
+            print(format_actionable_error(ERR_DEVICE_DISCONNECTED, context=val_msg, device_name=dev.display_name))
+        elif dev.state == "unauthorized":
+            print(format_actionable_error(ERR_DEVICE_UNAUTHORIZED, device_name=dev.display_name))
+        elif dev.state == "offline":
+            print(format_actionable_error(ERR_DEVICE_OFFLINE, device_name=dev.display_name))
+        else:
+            print(f"[!] Device validation failed: {val_msg}")
         return
+    dev = reval_dev or dev
 
     if not dev.is_accessible:
         if dev.state == "unauthorized":
@@ -816,10 +895,12 @@ def run_interactive_workflow(
             return
 
         # 7. Safe File Acquisition
-        # Verify connection right before acquisition starts
-        if not executor.is_device_connected(dev.serial):
-            print(format_actionable_error(ERR_DEVICE_DISCONNECTED, device_name=dev.display_name))
+        # Verify connection and authorization right before acquisition starts
+        acq_ok, acq_dev, acq_msg = executor.revalidate_selected_device(dev.serial)
+        if not acq_ok:
+            print(format_actionable_error(ERR_DEVICE_DISCONNECTED, context=acq_msg, device_name=dev.display_name))
             return
+        dev = acq_dev or dev
 
         print_screen_header("FILE ACQUISITION IN PROGRESS", dev, cfg)
         print(f"DEVICE       : {dev.display_name}")
@@ -1396,22 +1477,22 @@ def interactive_menu() -> None:
     # Preflight Check & Device Detection
     all_devs, selected_dev = detect_and_display_startup_devices(executor, settings)
 
-    # If 0 devices connected, offer retry or continue
+    # If 0 devices connected, offer retry, exit, or continue to main menu for offline navigation
     if not all_devs:
-        while not all_devs:
-            try:
-                prompt_act = input("Select [R] to Retry device detection, or [Q] to Exit: ").strip().lower()
-                if prompt_act == "q":
-                    print("\nExiting WRS. Goodbye.")
-                    sys.exit(0)
-                elif prompt_act == "r":
-                    executor.clear_cache()
-                    all_devs, selected_dev = detect_and_display_startup_devices(executor, settings)
-                else:
-                    print("Invalid choice. Press 'R' to retry detection or 'Q' to exit.")
-            except (KeyboardInterrupt, EOFError):
-                print("\nExiting WRS.")
+        print("[*] No active Android device connected. WRS remains available for offline case inspection,")
+        print("    report export, file verification, and settings.")
+        print("    Press [Enter] to navigate Main Menu, [R] to retry device detection, or [Q] to exit.")
+        try:
+            prompt_act = input("Selection [Enter/R/Q]: ").strip().lower()
+            if prompt_act == "q":
+                print("\nExiting WRS. Goodbye.")
                 sys.exit(0)
+            elif prompt_act == "r":
+                executor.clear_cache()
+                all_devs, selected_dev = detect_and_display_startup_devices(executor, settings)
+        except (KeyboardInterrupt, EOFError):
+            print("\nExiting WRS.")
+            sys.exit(0)
 
     while True:
         # Keep selected device name visible at top of main menu

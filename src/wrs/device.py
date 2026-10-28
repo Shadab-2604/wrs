@@ -138,6 +138,25 @@ class DeviceInfo:
         return True
 
 
+@dataclass
+class DeviceStatusResult:
+    """Authentic, independently determined ADB and Android device runtime status."""
+
+    adb_installed: bool
+    adb_available: bool
+    adb_version_raw: str
+    adb_version: str
+    adb_server_responsive: bool
+    adb_status_display: str
+    enumeration_success: bool
+    enumeration_error: Optional[str]
+    devices: List[DeviceInfo]
+    device_count: int
+    device_status_display: str
+    selected_device: Optional[DeviceInfo] = None
+    timestamp: str = ""
+
+
 class AdbExecutor:
     """Safely executes ADB commands with argument lists and strict timeouts."""
 
@@ -212,30 +231,76 @@ class AdbExecutor:
                 stderr=str(exc) if text else str(exc).encode(),
             )
 
-    def list_devices(self) -> List[DeviceInfo]:
-        """Enumerate connected Android devices using 'adb devices -l'."""
+    def check_adb_server(self) -> Tuple[bool, str]:
+        """Check ADB server responsiveness independently from device enumeration.
+
+        Returns:
+            (responsive, description)
+        """
         if not self.is_adb_installed():
-            return []
+            return False, "ADB executable not installed"
+
+        res = self.run_cmd(["get-state"], timeout=5)
+        out = (res.stdout + " " + res.stderr).lower()
+        if "cannot connect to daemon" in out or "could not connect to server" in out:
+            return False, "ADB server daemon unreachable"
+        if res.returncode == -1:
+            return False, "ADB server timed out"
+        return True, "ADB server responsive"
+
+    def enumerate_devices(self) -> Tuple[bool, List[DeviceInfo], Optional[str]]:
+        """Run 'adb devices -l' safely, returning (success, devices, error_message).
+
+        Distinguishes an empty device list from an execution failure.
+        Filters out ADB daemon startup noise (* daemon not running... * daemon started successfully).
+        Avoids treating the daemon or server as a connected device.
+        """
+        if not self.is_adb_installed():
+            return False, [], "ADB executable not found. Install android-tools-adb or android-sdk-platform-tools."
 
         res = self.run_cmd(["devices", "-l"], timeout=10)
         if res.returncode != 0:
-            logger.error("adb devices -l failed: %s", res.stderr)
-            return []
+            err = res.stderr.strip() if res.stderr else f"ADB command returned exit code {res.returncode}"
+            logger.error("adb devices -l failed: %s", err)
+            return False, [], err
 
         devices: List[DeviceInfo] = []
-        lines = res.stdout.strip().splitlines()
+        raw_output = res.stdout.strip()
+        if not raw_output:
+            return True, [], None
 
-        for line in lines[1:]:  # skip 'List of devices attached'
+        lines = raw_output.splitlines()
+
+        # Find the index of 'List of devices attached'
+        header_idx = -1
+        for idx, line in enumerate(lines):
+            clean = line.strip().lower()
+            if "list of devices attached" in clean:
+                header_idx = idx
+                break
+
+        # If header exists, parse lines after it; otherwise examine lines avoiding daemon lines
+        device_lines = lines[header_idx + 1:] if header_idx != -1 else lines
+
+        for line in device_lines:
             line = line.strip()
             if not line:
                 continue
+            # Filter daemon startup notifications and comments
+            if line.startswith("*") or "daemon" in line.lower():
+                continue
 
             parts = line.split()
-            if not parts:
+            if len(parts) < 2:
+                logger.warning("Ignoring malformed device entry in adb output: %s", line)
                 continue
 
             serial = parts[0]
-            state = parts[1] if len(parts) > 1 else "unknown"
+            # Extra safeguard: ensure serial is not an asterisk or daemon token
+            if serial.startswith("*") or serial.lower() == "daemon":
+                continue
+
+            state = parts[1]
 
             # Parse optional key-value descriptors (e.g. product:cheetah model:Pixel_7 device:cheetah)
             extra_props: dict[str, str] = {}
@@ -252,7 +317,6 @@ class AdbExecutor:
                 device_codename=extra_props.get("device", ""),
             )
 
-            # If unauthorized or offline, record appropriate advisory
             if state == "unauthorized":
                 dev.error_message = (
                     "Device is unauthorized. Please unlock your phone screen, "
@@ -267,7 +331,189 @@ class AdbExecutor:
 
             devices.append(dev)
 
-        return devices
+        return True, devices, None
+
+    def list_devices(self) -> List[DeviceInfo]:
+        """Enumerate connected Android devices using 'adb devices -l'.
+
+        Maintains backwards compatibility by returning a list of devices.
+        """
+        ok, devices, _ = self.enumerate_devices()
+        return devices if ok else []
+
+    def check_device_status(
+        self,
+        selected_serial: Optional[str] = None,
+        refresh: bool = False,
+    ) -> DeviceStatusResult:
+        """Independently assess ADB executable, ADB server, and connected Android device states.
+
+        Returns an authentic DeviceStatusResult. Updates RuntimeStateManager as single source of truth.
+        """
+        from .utils import format_timestamp
+        from .state import RuntimeStateManager
+
+        now_str = format_timestamp()
+
+        # 1. ADB Executable Check
+        if not self.is_adb_installed():
+            res = DeviceStatusResult(
+                adb_installed=False,
+                adb_available=False,
+                adb_version_raw="",
+                adb_version="",
+                adb_server_responsive=False,
+                adb_status_display="NOT INSTALLED",
+                enumeration_success=False,
+                enumeration_error="ADB executable not installed or not found in PATH",
+                devices=[],
+                device_count=0,
+                device_status_display="UNAVAILABLE (ADB Not Installed)",
+                selected_device=None,
+                timestamp=now_str,
+            )
+            RuntimeStateManager.get_instance().sync_device_status(res)
+            return res
+
+        # 2. ADB Version Check
+        ver_ok, ver_msg = self.get_adb_version()
+        if not ver_ok:
+            is_timeout = "timed out" in ver_msg.lower()
+            adb_disp = "ERROR (Command timed out)" if is_timeout else "UNAVAILABLE"
+            res = DeviceStatusResult(
+                adb_installed=True,
+                adb_available=False,
+                adb_version_raw=ver_msg,
+                adb_version="",
+                adb_server_responsive=False,
+                adb_status_display=adb_disp,
+                enumeration_success=False,
+                enumeration_error=ver_msg,
+                devices=[],
+                device_count=0,
+                device_status_display="UNAVAILABLE",
+                selected_device=None,
+                timestamp=now_str,
+            )
+            RuntimeStateManager.get_instance().sync_device_status(res)
+            return res
+
+        # Parse version
+        clean_ver = ""
+        m = re.search(r"version\s+([0-9.]+)", ver_msg)
+        if m:
+            clean_ver = m.group(1)
+            adb_status_display = f"AVAILABLE (version {clean_ver})"
+        else:
+            clean_ver = ver_msg.splitlines()[0] if ver_msg else ""
+            adb_status_display = f"AVAILABLE ({clean_ver})"
+
+        # 3. Enumerate Android Devices
+        enum_ok, devices, enum_err = self.enumerate_devices()
+        server_ok = enum_ok
+
+        if not enum_ok:
+            err_disp = enum_err or "Unknown command error"
+            res = DeviceStatusResult(
+                adb_installed=True,
+                adb_available=True,
+                adb_version_raw=ver_msg,
+                adb_version=clean_ver,
+                adb_server_responsive=False,
+                adb_status_display=adb_status_display,
+                enumeration_success=False,
+                enumeration_error=enum_err,
+                devices=[],
+                device_count=0,
+                device_status_display=f"ENUMERATION FAILED ({err_disp})",
+                selected_device=None,
+                timestamp=now_str,
+            )
+            RuntimeStateManager.get_instance().sync_device_status(res)
+            return res
+
+        # 4. Map Device States Authentically
+        dev_count = len(devices)
+        selected_dev: Optional[DeviceInfo] = None
+
+        if dev_count == 0:
+            dev_status_disp = "NONE DETECTED"
+        elif dev_count == 1:
+            single = devices[0]
+            if single.is_authorized:
+                if refresh or single.serial not in self._device_cache:
+                    single = self.get_device_details(single.serial, refresh=refresh)
+                    devices[0] = single
+                selected_dev = single
+                dev_status_disp = "CONNECTED AND AUTHORIZED"
+            elif single.state == "unauthorized":
+                selected_dev = single
+                dev_status_disp = "UNAUTHORIZED"
+            elif single.state == "offline":
+                selected_dev = single
+                dev_status_disp = "OFFLINE"
+            else:
+                selected_dev = single
+                dev_status_disp = single.state.upper()
+        else:
+            # Multiple devices detected
+            matched = next((d for d in devices if d.serial == selected_serial), None) if selected_serial else None
+            if matched:
+                if matched.is_authorized:
+                    if refresh or matched.serial not in self._device_cache:
+                        matched = self.get_device_details(matched.serial, refresh=refresh)
+                        devices = [matched if d.serial == matched.serial else d for d in devices]
+                    selected_dev = matched
+                    dev_status_disp = f"CONNECTED AND AUTHORIZED [{dev_count} detected]"
+                else:
+                    selected_dev = matched
+                    dev_status_disp = f"{matched.state.upper()} [{dev_count} detected]"
+            else:
+                dev_status_disp = f"{dev_count} DETECTED (Selection Required)"
+
+        res = DeviceStatusResult(
+            adb_installed=True,
+            adb_available=True,
+            adb_version_raw=ver_msg,
+            adb_version=clean_ver,
+            adb_server_responsive=server_ok,
+            adb_status_display=adb_status_display,
+            enumeration_success=True,
+            enumeration_error=None,
+            devices=devices,
+            device_count=dev_count,
+            device_status_display=dev_status_disp,
+            selected_device=selected_dev,
+            timestamp=now_str,
+        )
+        RuntimeStateManager.get_instance().sync_device_status(res)
+        return res
+
+    def refresh_devices(self, selected_serial: Optional[str] = None) -> DeviceStatusResult:
+        """Force refresh device enumeration and status."""
+        self.clear_cache()
+        return self.check_device_status(selected_serial=selected_serial, refresh=True)
+
+    def revalidate_selected_device(self, serial: str) -> Tuple[bool, Optional[DeviceInfo], str]:
+        """Recheck selected device before acquisition or scanning.
+
+        Returns:
+            (valid, device_info, message)
+        """
+        from .state import RuntimeStateManager
+        status = self.check_device_status(selected_serial=serial, refresh=True)
+        if not status.adb_available:
+            return False, None, f"ADB service is unavailable ({status.adb_status_display})."
+        if not status.enumeration_success:
+            return False, None, f"Device enumeration failed: {status.enumeration_error}"
+        dev = next((d for d in status.devices if d.serial == serial), None)
+        if not dev:
+            RuntimeStateManager.get_instance().invalidate_device("Device not found in active devices")
+            return False, None, f"Selected device '{serial}' is no longer connected."
+        if not dev.is_authorized:
+            return False, dev, f"Device '{serial}' is {dev.state.upper()}. Authorization required."
+        return True, dev, "Device connected and authorized."
+
 
     def clear_cache(self) -> None:
         """Clear cached session device metadata."""

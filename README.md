@@ -154,16 +154,32 @@ pip install -r requirements.txt --break-system-packages
 
 ## 5. Usage & Commands
 
-### Device-Aware Startup Preflight
-When WRS launches, it automatically performs preflight checks and queries ADB:
+### Device-Aware Startup Preflight & Terminal Header
+When WRS launches, it automatically performs preflight checks and independently queries ADB and connected devices:
 
+```text
+╭────────────────── WRS — WhatsApp Recovery Scanner ──────────────────╮
+│ Processing Mode : 100% Local Execution                              │
+│ ADB Status      : AVAILABLE (version 1.0.41)                         │
+│ Android Device  : NONE DETECTED                                     │
+│ Version         : v2.0.0                                            │
+│ Timestamp       : 2026-10-28 10:15:30                               │
+╰──────────── Forensic Acquisition & Preservation Utility ────────────╯
+```
+
+#### Independent Status Separation:
+- **ADB Status**: Derived strictly from `adb version`. Accurately reports `AVAILABLE (version X.Y.Z)`, `NOT INSTALLED`, `UNAVAILABLE`, or `ERROR (Command timed out)`. Success of ADB version is never used as proof of device connectivity.
+- **Android Device**: Derived strictly from `adb devices -l` enumeration. Accurately reports `NONE DETECTED` (when 0 devices connected), `CONNECTED AND AUTHORIZED`, `UNAUTHORIZED`, `OFFLINE`, or `ENUMERATION FAILED (error)`.
+- **Navigation with Zero Devices**: If no phone is attached, WRS displays actionable connection instructions and remains available for offline analysis (inspecting existing recovery directories, verifying cryptographic file hashes, packaging ZIP archives, reviewing databases, and managing settings).
+- **Single Source of Truth (`RuntimeStateManager`)**: All values throughout the workstation are tracked with explicit provenance (`CONFIGURED`, `OBSERVED`, `CALCULATED`, `COMPLETED`, `UNAVAILABLE`, `STALE`) ensuring zero fabricated or placeholder data leaks into reports or screens.
+
+When an authorized device is connected:
 ```text
 ==============================================================
           WRS — WHATSAPP RECOVERY SCANNER
 ==============================================================
-
 Environment       : Kali GNU/Linux Rolling
-ADB Status        : Available
+ADB Status        : AVAILABLE (version 1.0.41)
 Connected Devices : 1
 Current Time      : 2026-10-28 10:15:30
 
@@ -175,7 +191,6 @@ CONNECTED ANDROID DEVICES
     Android     : 14
     Device ID   : 2824****06G7
     Status      : CONNECTED / AUTHORIZED
-
 --------------------------------------------------------------
 Selected Device  : Google Pixel 7
 ==============================================================
