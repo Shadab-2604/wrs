@@ -75,7 +75,7 @@ def parse_category_selection(user_input: str) -> Tuple[bool, List[str], bool, st
 
     clean_upper = clean.upper()
 
-    if clean_upper == "0" or clean_upper == "BACK":
+    if clean_upper in ("0", "BACK", "B"):
         return True, [], False, "BACK"
 
     if clean_upper == "C" or clean_upper == "CLEAR":

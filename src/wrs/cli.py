@@ -70,6 +70,25 @@ from .restore import (
     RestoreCandidate,
     RestoreCandidateStatus,
 )
+from .ui import (
+    get_console,
+    is_color_enabled,
+    make_rich_acquisition_progress_callback,
+    make_rich_discovery_progress_callback,
+    print_acquire,
+    print_app_banner,
+    print_category_selection_screen,
+    print_confirmation_box,
+    print_error,
+    print_header,
+    print_info,
+    print_rich_missing_advisory,
+    print_scan,
+    print_success,
+    print_table_data,
+    print_warning,
+    set_force_no_color,
+)
 
 logger = logging.getLogger("wrs.cli")
 
@@ -138,24 +157,14 @@ def print_banner(
     top_border = f"╭{'─' * 18} WRS — WhatsApp Recovery Scanner {'─' * 18}╮"
     bot_border = f"╰{'─' * 12} Forensic Acquisition & Preservation Utility {'─' * 12}╯"
 
-    if HAS_RICH and console and hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
-        from rich import box
-        content = (
-            f"[bold cyan]Processing Mode[/bold cyan] : [bold]100% Local Execution[/bold]\n"
-            f"[bold cyan]ADB Status     [/bold cyan] : [bold green]{adb_status_str}[/bold green]\n"
-            f"[bold cyan]Android Device [/bold cyan] : [bold yellow]{device_status_str}[/bold yellow]\n"
-            f"[bold cyan]Version        [/bold cyan] : v{__version__}\n"
-            f"[bold cyan]Timestamp      [/bold cyan] : {now_str}"
+    if is_color_enabled() and get_console():
+        print_app_banner(
+            version=__version__,
+            adb_status_str=adb_status_str,
+            device_status_str=device_status_str,
+            scan_status_str="READY" if (device and device.is_accessible) else "IDLE",
+            timestamp_str=now_str,
         )
-        panel = Panel(
-            content,
-            title="[bold white]WRS — WhatsApp Recovery Scanner[/bold white]",
-            subtitle="[dim]Forensic Acquisition & Preservation Utility[/dim]",
-            box=box.ROUNDED,
-            border_style="cyan",
-            width=72,
-        )
-        console.print(panel)
     else:
         print(top_border)
         print(f"│ {'Processing Mode : 100% Local Execution':<68} │")
@@ -181,11 +190,7 @@ def print_screen_header(
         s_disp = device.get_display_serial(masked=mask)
         dev_label = f"{device.display_name} ({s_disp})"
 
-    print("\n" + "=" * 65)
-    print(f"  WRS — {title.upper()}")
-    print("=" * 65)
-    print(f"  Selected Device : {dev_label}")
-    print("-" * 65)
+    print_header(title, dev_label)
 
 
 def detect_and_display_startup_devices(
@@ -551,17 +556,25 @@ def ask_acquisition_confirmation(
         files_cnt = "Selected scope"
         total_sz = "As calculated in preview"
         dst = str(target)
-
-    print("\n" + "=" * 65)
-    print("  ACQUISITION PREVIEW & CONFIRMATION")
-    print("=" * 65)
-    print(f"  Device       : {dev}")
-    print(f"  Files        : {files_cnt}")
-    print(f"  Total Size   : {total_sz}")
-    print(f"  Destination  : {dst}")
-    print("=" * 65)
-    print("The scanner is ready to copy the selected files to the destination above.")
-    print("No source files will be deleted or modified on the Android device.\n")
+    if is_color_enabled() and get_console():
+        details = {
+            "Device": dev,
+            "Files": files_cnt,
+            "Total Size": total_sz,
+            "Destination": dst,
+        }
+        print_confirmation_box("The scanner is ready to copy the selected files to the destination above.", details)
+    else:
+        print("\n" + "=" * 65)
+        print("  ACQUISITION PREVIEW & CONFIRMATION")
+        print("=" * 65)
+        print(f"  Device       : {dev}")
+        print(f"  Files        : {files_cnt}")
+        print(f"  Total Size   : {total_sz}")
+        print(f"  Destination  : {dst}")
+        print("=" * 65)
+        print("The scanner is ready to copy the selected files to the destination above.")
+        print("No source files will be deleted or modified on the Android device.\n")
 
     try:
         ans = input("Proceed with acquisition? [y/N]: ").strip().lower()
@@ -654,23 +667,7 @@ def make_discovery_progress_callback(
     progress_enabled: bool = True,
 ) -> Callable[[str, int, int, float], None]:
     """Create discovery progress callback with plain-text fallback."""
-    last_print = [0.0]
-
-    def disc_progress(phase: str, count: int, total: int, elapsed: float) -> None:
-        now = time.time()
-        if not progress_enabled:
-            if count % 250 == 0 or count < 10:
-                print(f"[*] Scope: Accessible paths | Discovered: {count} files ({elapsed:.1f}s)")
-            return
-
-        if now - last_print[0] > 0.1 or count < 10:
-            last_print[0] = now
-            sys.stdout.write(
-                f"\r[*] DEVICE: {device_name[:16]} | {phase}: {count} accessible files | Elapsed: {elapsed:.1f}s"
-            )
-            sys.stdout.flush()
-
-    return disc_progress
+    return make_rich_discovery_progress_callback(device_name, location_path, progress_enabled)
 
 
 def make_acquisition_progress_callback(
@@ -679,47 +676,7 @@ def make_acquisition_progress_callback(
     progress_enabled: bool = True,
 ) -> Callable[[int, int, int, int, str, str, float], None]:
     """Create acquisition progress callback with real-time ETA and plain-text fallback."""
-    last_print = [0.0]
-    failure_count = [0]
-
-    def acq_progress(
-        completed: int,
-        remaining: int,
-        trans_b: int,
-        tot_b: int,
-        cur_fn: str,
-        stat: str,
-        elapsed: float,
-    ) -> None:
-        if stat in ("FAILED", "MISMATCH"):
-            failure_count[0] += 1
-
-        now = time.time()
-        if not progress_enabled:
-            if completed % 25 == 0 or remaining == 0:
-                print(
-                    f"[{completed}/{total_files}] Device: {device_name} | "
-                    f"Transferred: {format_bytes(trans_b)} | File: {cur_fn} | Status: {stat}"
-                )
-            return
-
-        if now - last_print[0] > 0.12 or remaining == 0:
-            last_print[0] = now
-            pct = (trans_b / tot_b * 100) if tot_b > 0 else 0
-            speed = trans_b / elapsed if elapsed > 0 else 0
-            eta_str = ""
-            if speed > 0 and tot_b > trans_b:
-                eta_sec = int((tot_b - trans_b) / speed)
-                eta_str = f" | ETA: {eta_sec}s"
-
-            fn_disp = cur_fn[:22] + "..." if len(cur_fn) > 25 else cur_fn
-            sys.stdout.write(
-                f"\rDEVICE: {device_name[:14]} | PROGRESS: {completed}/{total_files} ({pct:4.1f}%) | "
-                f"BYTES: {format_bytes(trans_b)} | FILE: {fn_disp:<25} | STAT: {stat:<8} | FAILS: {failure_count[0]}{eta_str}"
-            )
-            sys.stdout.flush()
-
-    return acq_progress
+    return make_rich_acquisition_progress_callback(device_name, total_files, progress_enabled)
 
 
 def display_scan_completed_summary(
@@ -1503,45 +1460,24 @@ def find_chat_database_candidates(base_dir: Path | str = "recovery") -> List[Pat
 def category_selection_interactive(current_selection: Optional[List[str]] = None) -> List[str]:
     """Interactive category selection screen (Phase 4, Option [2])."""
     curr = current_selection or ["All Supported Data"]
-    curr_str = ", ".join(curr)
 
-    print("\n" + "=" * 56)
-    print("       WRS — SELECT DATA CATEGORIES")
-    print("=" * 56)
-    print(f"Current Selection : {curr_str}\n")
-    print("[1] All Supported Data")
-    print("[2] Chat History")
-    print("[3] Photos and Images")
-    print("[4] Videos")
-    print("[5] Audio Files")
-    print("[6] Voice Notes")
-    print("[7] Documents and Files")
-    print("[8] Stickers")
-    print("[9] GIFs and Animated Media")
-    print("[10] Thumbnails")
-    print("[11] Databases and Backups")
-    print("[12] Other Supported Files\n")
-    print("Enter multiple options separated by commas.")
-    print("Example: 2,4,7\n")
-    print("[A] Select All")
-    print("[C] Clear Selection")
-    print("[0] Back\n")
+    print_category_selection_screen(CATEGORY_MENU_MAP, set(curr))
 
     user_in = input("Your selection: ").strip()
     valid, selected, includes_chats, msg = parse_category_selection(user_in)
     if not valid:
-        print(f"[!] {msg}")
+        print_warning(msg)
         return current_selection or ["All Supported Data"]
 
     if msg == "BACK":
         return current_selection or ["All Supported Data"]
 
     if msg == "Selection cleared.":
-        print("[*] Category selection cleared.")
+        print_info("Category selection cleared.")
         return []
 
-    print(f"[+] {msg}")
-    print(f"    Active Categories: {', '.join(selected)}")
+    print_success(msg)
+    print_info(f"Active Categories: {', '.join(selected)}")
     return selected
 
 
@@ -2058,12 +1994,21 @@ def inspect_backups_and_databases_interactive(
             inspect_target(Path(p_in).resolve(), device_name=device.display_name if device else None)
         return
 
-    print(f"Found {len(all_candidates)} candidate artifact(s):\n")
-    print(f"  {'#':<4} {'FILENAME':<32} {'SIZE':>10}  {'FORMAT':<10} {'STATUS':<12} {'LOCATION':<16}")
-    print("  " + "-" * 88)
+    if is_color_enabled() and get_console():
+        headers = ["#", "Filename", "Size", "Format", "Status", "Location"]
+        rows = [
+            [f"[{idx}]", c.filename, c.size_human, c.detected_format, c.status.value, c.evidence_location]
+            for idx, c in enumerate(all_candidates, start=1)
+        ]
+        print(f"\nFound {len(all_candidates)} candidate artifact(s):")
+        print_table_data("Candidate Database & Backup Artifacts", headers, rows)
+    else:
+        print(f"Found {len(all_candidates)} candidate artifact(s):\n")
+        print(f"  {'#':<4} {'FILENAME':<32} {'SIZE':>10}  {'FORMAT':<10} {'STATUS':<12} {'LOCATION':<16}")
+        print("  " + "-" * 88)
 
-    for idx, c in enumerate(all_candidates, start=1):
-        print(f"  [{idx:<2}] {c.filename:<32} {c.size_human:>10}  {c.detected_format:<10} {c.status.value:<12} {c.evidence_location:<16}")
+        for idx, c in enumerate(all_candidates, start=1):
+            print(f"  [{idx:<2}] {c.filename:<32} {c.size_human:>10}  {c.detected_format:<10} {c.status.value:<12} {c.evidence_location:<16}")
 
     print("\nOptions:")
     print("  [1-N] Inspect candidate details")
@@ -2213,13 +2158,22 @@ def view_previous_scans_interactive(settings: dict[str, Any]) -> None:
         print("[*] No previous scan directories found in ./recovery")
         return
 
-    print(f"Found {len(subdirs)} previous scan directory/directories:\n")
-    print(f"  {'#':<4} {'DIRECTORY NAME':<38} {'MODIFIED':<20}")
-    print("  " + "-" * 66)
+    if is_color_enabled() and get_console():
+        headers = ["#", "Directory Name", "Modified Timestamp"]
+        rows = [
+            [f"[{idx}]", d.name, datetime.fromtimestamp(d.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")]
+            for idx, d in enumerate(subdirs[:15], start=1)
+        ]
+        print(f"\nFound {len(subdirs)} previous scan directory/directories:")
+        print_table_data("Previous Scan Directories", headers, rows)
+    else:
+        print(f"Found {len(subdirs)} previous scan directory/directories:\n")
+        print(f"  {'#':<4} {'DIRECTORY NAME':<38} {'MODIFIED':<20}")
+        print("  " + "-" * 66)
 
-    for idx, d in enumerate(subdirs[:15], start=1):
-        mtime_str = datetime.fromtimestamp(d.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-        print(f"  [{idx:<2}] {d.name:<38} {mtime_str:<20}")
+        for idx, d in enumerate(subdirs[:15], start=1):
+            mtime_str = datetime.fromtimestamp(d.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            print(f"  [{idx:<2}] {d.name:<38} {mtime_str:<20}")
 
     print("\nOptions:")
     print("  [1-N] Inspect scan directory")
@@ -2350,24 +2304,53 @@ def interactive_menu() -> None:
         adb_status_str = status.adb_status_display
         scan_status_str = "READY" if (selected_dev and selected_dev.is_accessible) else "IDLE"
 
-        print("\n" + "=" * 56)
-        print("       WRS — WHATSAPP RECOVERY SCANNER")
-        print("=" * 56)
-        print(f"Selected Device : {dev_title}")
-        print(f"ADB Status      : {adb_status_str}")
-        print(f"Scan Status     : {scan_status_str}\n")
-        print("MAIN MENU\n")
-        print("[1] Scan and Recover Data")
-        print("[2] Select Specific Data Categories")
-        print("[3] Recover Chat History")
-        print("[4] Recover Media and Attachments")
-        print("[5] Inspect Backups and Databases")
-        print("[6] View Available Chat Dates")
-        print("[7] Export Recovered Data")
-        print("[8] Verify Existing Recovery Files")
-        print("[9] View Previous Scans")
-        print("[10] Settings and Help")
-        print("[0] Exit\n")
+        if is_color_enabled() and get_console():
+            c = get_console()
+            print_app_banner(
+                version=__version__,
+                adb_status_str=adb_status_str,
+                device_status_str=dev_title,
+                scan_status_str=scan_status_str,
+            )
+            c.print("[bold cyan]────────────────────────────────────────────────────────[/bold cyan]")
+            c.print("  [bold cyan]MAIN MENU[/bold cyan]")
+            c.print("[bold cyan]────────────────────────────────────────────────────────[/bold cyan]")
+            menu_items = [
+                ("1", "Scan and Recover Data", "Guided discovery, preview & acquisition wizard"),
+                ("2", "Select Specific Data Categories", "Filter chat, media, backup & database targets"),
+                ("3", "Recover Chat History", "Reconstruct SQLite messages & timeline"),
+                ("4", "Recover Media and Attachments", "Acquire pictures, video, audio & docs"),
+                ("5", "Inspect Backups and Databases", "Analyze encrypted & unencrypted databases"),
+                ("6", "View Available Chat Dates", "Explore calendar spans of message history"),
+                ("7", "Export Recovered Data", "Package artifacts into CSV, JSON, HTML or ZIP"),
+                ("8", "Verify Existing Recovery Files", "Evaluate cryptographic SHA-256 integrity"),
+                ("9", "View Previous Scans", "Browse previous scan sessions & reports"),
+                ("10", "Settings and Help", "Configure ADB, hashing & interface settings"),
+                ("0", "Exit", "Close WRS session safely"),
+            ]
+            for num, title, desc in menu_items:
+                opt_color = "bold cyan" if num != "0" else "dim"
+                c.print(f"  [{opt_color}][{num:>2}][/{opt_color}]  [bold white]{title:<32}[/bold white] [dim]{desc}[/dim]")
+            c.print("")
+        else:
+            print("\n" + "=" * 56)
+            print("       WRS — WHATSAPP RECOVERY SCANNER")
+            print("=" * 56)
+            print(f"Selected Device : {dev_title}")
+            print(f"ADB Status      : {adb_status_str}")
+            print(f"Scan Status     : {scan_status_str}\n")
+            print("MAIN MENU\n")
+            print("[1] Scan and Recover Data")
+            print("[2] Select Specific Data Categories")
+            print("[3] Recover Chat History")
+            print("[4] Recover Media and Attachments")
+            print("[5] Inspect Backups and Databases")
+            print("[6] View Available Chat Dates")
+            print("[7] Export Recovered Data")
+            print("[8] Verify Existing Recovery Files")
+            print("[9] View Previous Scans")
+            print("[10] Settings and Help")
+            print("[0] Exit\n")
 
         try:
             choice = input("Select an option: ").strip()
@@ -2456,6 +2439,11 @@ def parse_args() -> argparse.Namespace:
         help="Run without interactive confirmation prompts (requires explicit --acquire and scope)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Simulate acquisition inventory without copying files")
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable colors and terminal styling (also respects NO_COLOR env var)",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose debug logging")
 
     return parser.parse_args()
@@ -2464,6 +2452,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     """CLI entry point."""
     args = parse_args()
+
+    if args.no_color or bool(os.environ.get("NO_COLOR", "").strip()):
+        set_force_no_color(True)
+
+    if not is_color_enabled() and not args.no_color and sys.stdout.isatty() and not HAS_RICH:
+        print_rich_missing_advisory()
 
     if args.verbose:
         logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -2477,15 +2471,21 @@ def main() -> None:
     # 1. Standalone verification mode
     if args.verify:
         print_banner(executor, settings=settings)
-        print(f"[*] Verifying recovery directory: {args.verify}")
+        print_info(f"Verifying recovery directory: {args.verify}")
         res = verify_recovery_directory(args.verify)
         if not res.get("success"):
-            print(f"[!] Verification failed: {res.get('error')}")
+            print_error(f"Verification failed: {res.get('error')}")
             sys.exit(1)
-        print(f"[+] Total checked : {res['total']}")
-        print(f"[+] Verified intact: {res['verified_count']}")
-        print(f"[!] Mismatches    : {res['mismatch_count']}")
-        print(f"[!] Missing files : {res['missing_count']}")
+        print_info(f"Total checked      : {res['total']}")
+        print_success(f"Verified intact    : {res['verified_count']}")
+        if res['mismatch_count'] > 0:
+            print_warning(f"Mismatches         : {res['mismatch_count']}")
+        else:
+            print_info(f"Mismatches         : 0")
+        if res['missing_count'] > 0:
+            print_error(f"Missing files      : {res['missing_count']}")
+        else:
+            print_info(f"Missing files      : 0")
         sys.exit(0 if res.get("is_fully_intact") else 2)
 
     # 2. Inspect mode

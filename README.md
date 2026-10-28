@@ -132,11 +132,44 @@ cd wrs
 ```bash
 pip install -r requirements.txt --break-system-packages
 ```
-*(Dependencies are strictly minimal: `cryptography`, `rich`, `python-magic`, and `pytest`.)*
+*(Dependencies are strictly minimal: `rich` for professional terminal styling, `python-magic` for MIME sniffing, and `pytest` for test verification.)*
 
 ---
 
-## 4. Android Device Setup
+## 4. Terminal UI Styling & Design Theme
+
+WRS features a clean, moderately colorful, professional terminal interface tailored for Kali Linux and dark terminal environments. Built like a high-grade forensic utility, it emphasizes readability, clear status hierarchy, and zero clutter or gratuitous animations.
+
+### Color Theme & Semantic Meaning
+- **Cyan / Blue**: Main headings, framed banners, menu option numbers, device properties.
+- **Green**: Completed operations, verified integrity, authorized Android devices, completed scans (`[SUCCESS]`).
+- **Yellow**: Limitations, warnings, encrypted backup candidates, confirmation dialogs (`[WARNING]`).
+- **Red**: Critical errors, unauthorized/offline devices, failed operations (`[ERROR]`).
+- **Magenta**: Scan activities, analysis modules, recovery/export sections (`[SCAN]`).
+- **White / Bright White**: Important values, primary metrics, active category labels.
+- **Dim Gray**: Secondary descriptions, metadata timestamps, separators, inactive markers (`[○]`).
+
+### Reusable Status Messages
+Operations output standardized, color-coded status prefixes with consistent character alignment:
+```text
+[SUCCESS] Device authorized and ready.
+[INFO]    Scanning accessible shared storage.
+[WARNING] Encrypted database detected; readability is not yet verified.
+[ERROR]   Device is unauthorized. Approve the debugging prompt on the phone.
+[SCAN]    Enumerating accessible storage locations.
+[ACQUIRE] [25/100] (25.0%) | Bytes: 10.50 MiB | File: msgstore.db.crypt14 | Status: VERIFIED
+```
+
+### Color Accessibility & Graceful Fallback
+- **`NO_COLOR` Specification**: Respects the `NO_COLOR` environment variable (https://no-color.org). When set, all ANSI escapes are disabled.
+- **Pipe & Redirection Awareness**: Automatically disables terminal escape sequences and cursor rewrites when output is redirected to files or pipes (e.g. `wrs --acquire > acquisition.log`).
+- **Terminal Capabilities**: Disables styling automatically on `TERM=dumb`.
+- **Command-Line Flag**: Pass `--no-color` to explicitly disable all colors and Rich styling.
+- **Graceful Rich Fallback**: If Python `rich` is not installed, WRS operates using clean, standard ASCII borders and tabular text without crashing.
+
+---
+
+## 5. Android Device Setup
 
 1. **Enable Developer Options**: Go to **Settings** > **About Phone** and tap **Build Number** 7 times.
 2. **Enable USB Debugging**: In **Settings** > **System** > **Developer Options**, enable **USB Debugging**.
@@ -152,19 +185,48 @@ pip install -r requirements.txt --break-system-packages
 
 ---
 
-## 5. Usage & Commands
+## 6. Usage & Commands
+
+### CLI Arguments & Options
+```bash
+python3 wrs.py [OPTIONS]
+```
+
+| Argument | Description |
+| :--- | :--- |
+| `-h`, `--help` | Show complete command options and exit. |
+| `--version` | Display installed WRS version. |
+| `--list-devices` | List connected Android devices and ADB daemon status, then exit. |
+| `--device <SERIAL>` | Target specific device serial when multiple phones are attached. |
+| `--scan` | Run discovery and build SQLite inventory without copying files. |
+| `--acquire` | Perform scan and acquire verified files to disk. |
+| `--output <DIR>` | Custom recovery output directory. |
+| `--categories <LIST>` | Filter specific categories (e.g. `Images,Videos,Databases`). |
+| `--exclude-duplicates` | Exclude redundant duplicate files during acquisition. |
+| `--inspect <PATH>` | Inspect SQLite/crypt database or existing recovery folder. |
+| `--verify <DIR>` | Cryptographically verify SHA-256 integrity of recovery directory. |
+| `--export <TARGET>` | Reconstruct and export chats from target database. |
+| `--format <FMT>` | Chat export format: `all`, `txt`, `html`, `json`, `csv`, `zip`. |
+| `--key <KEY_FILE>` | WhatsApp 32-byte encryption key for crypt14/15 decryption. |
+| `--unattended`, `--yes`| Run without interactive confirmation prompts (requires `--acquire`). |
+| `--dry-run` | Simulate acquisition inventory without writing files. |
+| `--no-color` | Disable colored output and terminal styling. |
+| `--verbose` | Enable debug logging. |
 
 ### Device-Aware Startup Preflight & Terminal Header
 When WRS launches, it automatically performs preflight checks and independently queries ADB and connected devices:
 
 ```text
-╭────────────────── WRS — WhatsApp Recovery Scanner ──────────────────╮
-│ Processing Mode : 100% Local Execution                              │
-│ ADB Status      : AVAILABLE (version 1.0.41)                         │
-│ Android Device  : NONE DETECTED                                     │
-│ Version         : v2.0.0                                            │
-│ Timestamp       : 2026-10-28 10:15:30                               │
-╰──────────── Forensic Acquisition & Preservation Utility ────────────╯
+╭──────────────────────────────────────────────────────────────╮
+│  WRS — WhatsApp Recovery Scanner                             │
+│  Local Android Data Discovery & Recovery Assistance          │
+╰──────────────────────────────────────────────────────────────╯
+
+  DEVICE       : Google Pixel 8 (CONNECTED AND AUTHORIZED)
+  ADB          : AVAILABLE (version 1.0.41)
+  SCAN         : READY
+  MODE         : 100% Local Execution
+  VERSION      : v2.0.0
 ```
 
 #### Independent Status Separation:
@@ -173,7 +235,7 @@ When WRS launches, it automatically performs preflight checks and independently 
 - **Navigation with Zero Devices**: If no phone is attached, WRS displays actionable connection instructions and remains available for offline analysis (inspecting existing recovery directories, verifying cryptographic file hashes, packaging ZIP archives, reviewing databases, and managing settings).
 - **Single Source of Truth (`RuntimeStateManager`)**: All values throughout the workstation are tracked with explicit provenance (`CONFIGURED`, `OBSERVED`, `CALCULATED`, `COMPLETED`, `UNAVAILABLE`, `STALE`) ensuring zero fabricated or placeholder data leaks into reports or screens.
 
-When an authorized device is connected:
+When an authorized device is connected in fallback mode:
 ```text
 ==============================================================
           WRS — WHATSAPP RECOVERY SCANNER
@@ -196,7 +258,7 @@ Selected Device  : Google Pixel 7
 ==============================================================
 ```
 
-### 10-Option Main Menu (Phase 4)
+### 10-Option Main Menu
 
 ```text
 ========================================================
@@ -742,7 +804,7 @@ recovery/
 
 ## 10. Automated Test Suite
 
-WRS includes a comprehensive suite of **113 automated unit tests** (100% passing):
+WRS includes a comprehensive suite of **126 automated unit tests** (100% passing):
 
 ```bash
 # Run full test suite with pytest
@@ -753,7 +815,8 @@ python3 -m unittest discover tests
 ```
 
 ### Test Coverage Summary:
-- `test_recovery_wizard.py` *(Phase 4)*: Category parsing (all, comma-separated e.g. `2,4,7`, `A`, `C`, `0`), storage category translation, real calendar date validation (rejecting `31-02-2024`, end < start, outside range, partial overlaps, inclusive boundaries), timeline extraction, available-date calendar counts, specific-date filtering, multiple conversation filtering, timezone-aware timestamp conversion, and multi-format chat exports.
+- `test_ui.py` *(UI Enhancement)*: Validates terminal color policy (`NO_COLOR`, `TERM=dumb`, non-tty streams, `--no-color` CLI flag), reusable status formatting helpers (`[SUCCESS]`, `[INFO]`, `[WARNING]`, `[ERROR]`, `[SCAN]`, `[ACQUIRE]`), category selection active markers (`[●]` vs `[○]`), Rich structured tables and fallback, styled confirmation panels, and periodic non-tty progress callbacks without carriage return overwrites.
+- `test_recovery_wizard.py` *(Phase 4)*: Category parsing (all, comma-separated e.g. `2,4,7`, `A`, `C`, `0`, `B`), storage category translation, real calendar date validation (rejecting `31-02-2024`, end < start, outside range, partial overlaps, inclusive boundaries), timeline extraction, available-date calendar counts, specific-date filtering, multiple conversation filtering, timezone-aware timestamp conversion, and multi-format chat exports.
 - `test_restore_assistant.py` *(Phase 4)*: Restoration candidate scanning (local and remote), forensic provenance tracking, source assessment (`LOCAL_BACKUP`, `SUPPORTED_READABLE_DATABASE`, `MEDIA_ONLY_COLLECTION`, `UNSUPPORTED_ARTIFACT`), prohibition against classifying encrypted DB as restorable solely from filename, staging preparation with manifest, staging collision detection, device destination collision refusal, affirmative confirmation requirement, and verification checklist.
 - `test_device_status_authenticity.py`: Authentic status separation (`AVAILABLE` vs `NONE DETECTED`), daemon noise filtering, offline/unauthorized device property query suppression, multiple device selection enforcement, hotplug disconnection handling, and runtime state provenance (`RuntimeStateManager`).
 - `test_device_ux.py`: Device detection, single/multiple device selection, unauthorized/offline/disconnected states, fallback naming, Unicode handling, serial masking, transfer disconnection safety.
