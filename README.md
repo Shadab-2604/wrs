@@ -197,6 +197,7 @@ Selected Device  : Google Pixel 7
 ```
 
 ### 9-Option Main Menu
+
 ```text
 ==============================================================
           WRS — WHATSAPP RECOVERY SCANNER
@@ -215,7 +216,337 @@ Selected Device: Google Pixel 7 (2824****06G7)
 ==============================================================
 ```
 
-### Command-Line Scripting & Headless Automation
+---
+
+## 6. Comprehensive Option Guide & Expected Terminal Outputs
+
+### Option [1]: Scan and Discover WhatsApp Data (Inventory-Only Mode)
+**Purpose:** Performs a non-invasive, read-only inventory scan of accessible WhatsApp storage locations without copying any files from the device. Categorizes all assets, calculates total bytes, saves entries into `scan_inventory.db`, and exports inventory catalogs (`report.html`, `report.csv`, `report.json`).
+
+**How to Use:**
+1. Type `1` at the main menu and press **Enter**.
+2. If multiple locations are discovered, choose `[1]` to scan all accessible locations.
+
+**Expected Terminal Output:**
+```text
+=================================================================
+  WRS — STORAGE DISCOVERY
+=================================================================
+  Selected Device : Google Pixel 7 (2824****06G7)
+-----------------------------------------------------------------
+[*] Discovering WhatsApp storage on Google Pixel 7 (2824****06G7)...
+
+--- Discovered WhatsApp Storage Locations on Google Pixel 7 ---
+  [1] /storage/emulated/0/Android/media/com.whatsapp/WhatsApp/ (Read-only Accessible)
+       ↳ Alias normalized: /sdcard/Android/media/com.whatsapp/WhatsApp/
+
+=================================================================
+  WRS — SCAN & INVENTORY
+=================================================================
+  Selected Device : Google Pixel 7 (2824****06G7)
+-----------------------------------------------------------------
+[*] Scanning location: /storage/emulated/0/Android/media/com.whatsapp/WhatsApp/
+    Enumerating files without modification (Scope: Accessible selected locations)...
+
+[+] Scan completed: 1,516 accessible files (1.44 GiB)
+[*] Inventory-only scan requested. Saving scan catalog...
+
+=================================================================
+  SCAN COMPLETED
+=================================================================
+  Device             : Google Pixel 7
+  Files discovered   : 1516
+  Total data         : 1.44 GiB
+  Database candidates: 9
+  Media files        : 1462
+  Inaccessible paths : 0
+  Reports            : recovery/Google_Pixel_7_scan_2026-10-28_10-00-00/reports
+=================================================================
+```
+
+---
+
+### Option [2]: Scan and Acquire Data (Full Forensic Acquisition)
+**Purpose:** Complete evidence acquisition workflow. Discovers WhatsApp storage, scans files, displays a pre-acquisition preview, enables interactive scope filtering, validates available disk space against safety margins, requires affirmative confirmation, copies files with timestamps preserved, computes SHA-256 hashes, analyzes databases, reconstructs chats, associates media, and generates reports.
+
+**How to Use:**
+1. Type `2` at the main menu and press **Enter**.
+2. Select target storage locations.
+3. Review the **Acquisition Preview**. Select `[1]` to proceed with full scope, or `[2]` / `[3]` to customize categories or exclude duplicate candidate files.
+4. Type `yes` to confirm acquisition.
+
+**Expected Terminal Output:**
+```text
+========================================================================
+  WRS — ACQUISITION PREVIEW
+========================================================================
+  Scan ID                 : scan_28241FDH_20261028_100000_a1b2c3
+  Device Name & Model     : Google Pixel 7
+  Device Serial / ID      : 2824****06G7
+  Android OS Version      : 14
+  Scan Timestamp          : 2026-10-28 10:00:00
+  Selected Source Scope   : /storage/emulated/0/Android/media/com.whatsapp/WhatsApp/
+  Eligible Files Selected : 1516
+  Available Disk Space    : 148.50 GiB
+  Estimated Required Space: 1.58 GiB
+  Configured Safety Margin: 100.00 MiB (10% dynamic)
+  Target Destination Path : /home/bablu/TOOLS/wrs/recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
+------------------------------------------------------------------------
+  CATEGORY                  FILES        TOTAL SIZE
+  --------------------------------------------------
+  Databases                     2          42.18 MiB
+  Backups                       7         128.45 MiB
+  Images                      450         312.80 MiB
+  Videos                       32         850.12 MiB
+  Audio                        18          14.20 MiB
+  Voice Notes                 812          68.90 MiB
+  Documents                    24          45.10 MiB
+  Stickers                    120          11.35 MiB
+  Animated GIFs                 6           4.12 MiB
+  Other                        45           1.25 MiB
+  --------------------------------------------------
+  TOTAL                      1516           1.44 GiB
+
+  Database / Backup Candidates        : 9
+  Duplicate Content Candidates        : 48
+  Storage Assessment                  : Disk space OK: 148.50 GiB available. Required: 1.44 GiB + 147.45 MiB margin.
+========================================================================
+
+Proceed with acquisition of 1516 files (1.44 GiB) from Google Pixel 7?
+Destination: /home/bablu/TOOLS/wrs/recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
+Enter 'yes' to proceed, or press Enter to cancel [y/N]: yes
+
+=================================================================
+  WRS — FILE ACQUISITION IN PROGRESS
+=================================================================
+  Selected Device : Google Pixel 7 (2824****06G7)
+-----------------------------------------------------------------
+DEVICE       : Google Pixel 7
+PHASE        : FILE ACQUISITION
+TOTAL FILES  : 1516
+TOTAL BYTES  : 1.44 GiB
+DESTINATION  : /home/bablu/TOOLS/wrs/recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
+-----------------------------------------------------------------
+DEVICE: Google Pixel 7 | PROGRESS: 1516/1516 (100.0%) | BYTES: 1.44 GiB | FILE: msgstore.db.crypt14       | STAT: VERIFIED | FAILS: 0
+
+[+] Acquisition phase finished.
+[+] Reconstructed 14 conversation threads (2,840 messages).
+
+=================================================================
+  ACQUISITION SUMMARY
+=================================================================
+  Device              : Google Pixel 7
+  Target Destination  : /home/bablu/TOOLS/wrs/recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
+  Total Acquired      : 1516 files
+  SHA-256 Verified    : 1516 files
+  Chats Reconstructed : 14 conversations
+  HTML Report         : .../reports/report.html
+  CSV Report          : .../reports/report.csv
+  JSON Report         : .../reports/report.json
+=================================================================
+```
+
+---
+
+### Option [3]: Inspect an Existing Recovery Case
+**Purpose:** Inspects an existing recovery case directory or a standalone WhatsApp SQLite/Crypt database. Verifies manifest status, lists internal database candidates, extracts SQLite tables, parses message threads, and decrypts crypt14/15 files when a key is provided.
+
+**How to Use:**
+1. Type `3` at the main menu and press **Enter**.
+2. Enter the path to a recovery directory (e.g. `./recovery/Google_Pixel_7_scan_2026-10-28_10-00-00`) or a database file (`.../Databases/msgstore.db`).
+3. (Optional) Provide the path to a decryption key file if inspecting encrypted databases.
+
+**Expected Terminal Output:**
+```text
+Enter path to recovery directory or database file: recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
+Enter path to decryption key (optional, press Enter to skip): 
+
+=================================================================
+  INSPECTING RECOVERY DIRECTORY: Google_Pixel_7_scan_2026-10-28_10-00-00
+=================================================================
+  Selected Device    : Google Pixel 7
+  Manifest Found     : .../metadata/acquisition_manifest.json
+  Total Tracked Files: 1516
+  Intact & Verified  : 1516
+  Mismatched / Fail  : 0
+  Missing Files      : 0
+  Integrity Status   : PASSED (Fully Intact)
+
+  Found 2 database candidate(s) in directory:
+   • msgstore.db.crypt14                42.18 MiB  Format: Encrypted (crypt14)
+   • wa.db                               2.10 MiB  Format: SQLite
+=================================================================
+```
+
+---
+
+### Option [4]: Verify Acquired Files
+**Purpose:** Cryptographic post-acquisition verification tool. Evaluates every local acquired file against the SHA-256 signatures in `acquisition_manifest.json` to prove evidence integrity and detect tampering or disk corruption.
+
+**How to Use:**
+1. Type `4` at the main menu and press **Enter**.
+2. Enter the path to the recovery directory to audit.
+
+**Expected Terminal Output:**
+```text
+=================================================================
+  WRS — INTEGRITY VERIFICATION
+=================================================================
+  Selected Device : Google Pixel 7 (2824****06G7)
+-----------------------------------------------------------------
+Enter recovery directory path to verify: recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
+
+[*] Verifying cryptographic SHA-256 hashes against manifest: Google_Pixel_7_scan_2026-10-28_10-00-00...
+
+=================================================================
+  INTEGRITY VERIFICATION RESULT
+=================================================================
+  Device              : Google Pixel 7
+  Recovery Path       : /home/bablu/TOOLS/wrs/recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
+  Total Checked Files : 1516
+  Cryptographically OK: 1516
+  Hash Mismatches     : 0
+  Missing Acquired    : 0
+  Status Assessment   : PASSED — FULLY INTACT
+=================================================================
+```
+
+---
+
+### Option [5]: Export Reports and ZIP Archive
+**Purpose:** Exports chat conversations to diverse forensic formats (HTML visual bubbles, JSON structured data, CSV tables, plain TXT) or packages a complete case into a verified ZIP archive with pre-allocated disk check and internal SHA-256 manifest.
+
+**How to Use:**
+1. Type `5` at the main menu and press **Enter**.
+2. Choose `[1]` to Export chats or `[2]` to Package recovery directory into verified ZIP.
+
+**Expected Terminal Output (Packaging ZIP):**
+```text
+============================================================
+  ARCHIVE PACKAGING PREVIEW
+============================================================
+  Source Directory    : /home/bablu/TOOLS/wrs/recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
+  Eligible Files      : 1524
+  Uncompressed Size   : 1.45 GiB
+  Estimated ZIP Size  : 1.38 GiB
+  Available Disk Space: 148.50 GiB
+  Space Sufficient    : Yes
+============================================================
+
+Enter destination ZIP name (default: Google_Pixel_7_scan_2026-10-28_10-00-00.zip): 
+Package 1524 files into Google_Pixel_7_scan_2026-10-28_10-00-00.zip? [y/N]: y
+
+[*] Creating and verifying ZIP archive...
+[+] Archive created successfully: .../Google_Pixel_7_scan_2026-10-28_10-00-00.zip
+    Size: 1.38 GiB
+```
+
+---
+
+### Option [6]: Review Database Candidates
+**Purpose:** Discovers and analyzes all SQLite and encrypted database files in the recovery folder, checking table schemas, record counts, and encryption versions.
+
+**How to Use:**
+1. Type `6` at the main menu and press **Enter**.
+2. Press Enter to use the default `./recovery` directory or enter a custom path.
+
+**Expected Terminal Output:**
+```text
+=================================================================
+  WRS — REVIEW DATABASE CANDIDATES
+=================================================================
+  Selected Device : Google Pixel 7 (2824****06G7)
+-----------------------------------------------------------------
+Enter recovery folder path to inspect (default: ./recovery): 
+
+[*] Scanning for WhatsApp database candidates in /home/bablu/TOOLS/wrs/recovery...
+
+  DATABASE CANDIDATE FILE          SIZE       FORMAT            STATUS / DETAILS
+  --------------------------------------------------------------------------------
+  msgstore.db.crypt14          42.18 MiB  Crypt14 (AES-GCM) Encrypted (Key Required)
+  msgstore-2026-10-26.1.db.crypt14 41.90 MiB  Crypt14 (AES-GCM) Dated Backup
+  wa.db                         2.10 MiB  SQLite 3          5 tables (Contacts/JIDs)
+  --------------------------------------------------------------------------------
+  Total Candidates Discovered: 3 (1 SQLite compatible, 2 Encrypted)
+=================================================================
+```
+
+---
+
+### Option [7]: Settings and Configuration
+**Purpose:** Customizes runtime settings (`config/settings.json`), including serial masking, live transfer progress display, default recovery path, and safety margin thresholds.
+
+**How to Use:**
+1. Type `7` at the main menu and press **Enter**.
+2. Choose an option (1-6) to update settings, or `[7]` to return to the main menu.
+
+**Expected Terminal Output:**
+```text
+============================================================
+  WRS — SETTINGS & CONFIGURATION
+============================================================
+  [1] Mask Device Serial in UI    : Disabled
+  [2] Live Progress Display       : Enabled
+  [3] Default Recovery Directory  : recovery
+  [4] Safety Margin Free Space    : 100.00 MiB
+  [5] Safety Margin Ratio         : 10%
+  [6] Reset to Factory Defaults
+  [7] Return to Main Menu
+============================================================
+Enter choice [1-7]: 1
+[+] Serial masking in UI enabled.
+```
+
+---
+
+### Option [8]: Refresh Connected Devices
+**Purpose:** Forces an immediate re-enumeration of Android devices connected via ADB. Clears cached device metadata, checks ADB server responsiveness, and updates the terminal header with real-time connection status.
+
+**How to Use:**
+1. Type `8` at the main menu and press **Enter**.
+
+**Expected Terminal Output:**
+```text
+[*] Refreshing connected Android devices...
+╭────────────────── WRS — WhatsApp Recovery Scanner ──────────────────╮
+│ Processing Mode : 100% Local Execution                              │
+│ ADB Status      : AVAILABLE (version 1.0.41)                         │
+│ Android Device  : Google Pixel 7 (CONNECTED AND AUTHORIZED)          │
+│ Version         : v2.0.0                                            │
+│ Timestamp       : 2026-10-28 10:20:00                               │
+╰──────────── Forensic Acquisition & Preservation Utility ────────────╯
+
+CONNECTED ANDROID DEVICES
+--------------------------------------------------------------
+[1] Device Name : Google Pixel 7
+    Model       : Pixel 7
+    Manufacturer: Google
+    Android     : 14
+    Device ID   : 2824****06G7
+    Status      : CONNECTED / AUTHORIZED
+--------------------------------------------------------------
+Selected Device  : Google Pixel 7
+==============================================================
+```
+
+---
+
+### Option [9]: Exit
+**Purpose:** Cleanly terminates the application session without leaving orphaned processes.
+
+**How to Use:**
+1. Type `9` at the main menu and press **Enter**.
+
+**Expected Terminal Output:**
+```text
+Exiting WRS. Goodbye.
+```
+
+---
+
+## 7. Command-Line Scripting & Headless Automation
+
+WRS supports full non-interactive command-line execution for automated forensic pipelines:
 
 - **List connected devices:**
   ```bash
@@ -409,9 +740,9 @@ recovery/
 
 ---
 
-## 10. Automated Test Suite
+## 11. Automated Test Suite
 
-WRS includes a comprehensive suite of 75 automated unit tests:
+WRS includes a comprehensive suite of **88 automated unit tests** (100% passing):
 
 ```bash
 # Run full test suite with pytest
@@ -422,6 +753,7 @@ python3 -m unittest discover tests
 ```
 
 ### Test Coverage Summary:
+- `test_device_status_authenticity.py`: Authentic status separation (`AVAILABLE` vs `NONE DETECTED`), daemon noise filtering, offline/unauthorized device property query suppression, multiple device selection enforcement, hotplug disconnection handling, and runtime state provenance (`RuntimeStateManager`).
 - `test_device_ux.py`: Device detection, single/multiple device selection, unauthorized/offline/disconnected states, fallback naming, Unicode handling, serial masking, transfer disconnection safety.
 - `test_cli_ux.py`: Persistent screen headers, confirmation prompts, recovery folder naming, plain-text progress fallback, dry-run mode, and persistent configuration.
 - `test_acquisition.py`: Preview generation, directory hierarchy, mock ADB pulls, and resumption.
