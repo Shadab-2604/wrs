@@ -1,0 +1,78 @@
+{
+  "app_name": "WRS — WhatsApp Recovery Scanner",
+  "version": "1.0.0",
+  "storage": {
+    "target_paths": [
+      "/sdcard/Android/media/com.whatsapp/WhatsApp/",
+      "/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/",
+      "/sdcard/WhatsApp/",
+      "/storage/emulated/0/WhatsApp/",
+      "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp/",
+      "/storage/emulated/0/Android/media/com.whatsapp.w4b/WhatsApp/"
+    ],
+    "removable_search_roots": [
+      "/storage/",
+      "/mnt/media_rw/"
+    ],
+    "app_type_markers": {
+      "com.whatsapp.w4b": "WhatsApp Business",
+      "com.whatsapp": "WhatsApp Standard",
+      "WhatsApp": "WhatsApp Standard"
+    }
+  },
+  "acquisition": {
+    "default_recovery_dir": "recovery",
+    "safety_margin_bytes": 104857600,
+    "safety_margin_ratio": 0.10,
+    "chunk_size_bytes": 65536,
+    "hash_algorithm": "sha256",
+    "adb_command_timeout_seconds": 30,
+    "adb_pull_timeout_seconds": 300
+  },
+  "categories": {
+    "Databases": {
+      "directory_name": "Databases",
+      "description": "WhatsApp databases including msgstore.db and crypt14/crypt15 encrypted databases"
+    },
+    "Backups": {
+      "directory_name": "Backups",
+      "description": "Dated WhatsApp database backups and backup metadata"
+    },
+    "Images": {
+      "directory_name": "Images",
+      "description": "Photos, wallpapers, and standard image formats"
+    },
+    "Videos": {
+      "directory_name": "Videos",
+      "description": "Video recordings and video clips"
+    },
+    "Audio": {
+      "directory_name": "Audio",
+      "description": "Standard music and audio tracks"
+    },
+    "Voice_Notes": {
+      "directory_name": "Voice_Notes",
+      "description": "Push-to-Talk (PTT) voice messages and WhatsApp voice recordings"
+    },
+    "Documents": {
+      "directory_name": "Documents",
+      "description": "PDFs, office documents, text files, and archives"
+    },
+    "Stickers": {
+      "directory_name": "Stickers",
+      "description": "Sticker assets and sticker packs"
+    },
+    "Animated_GIFs": {
+      "directory_name": "Animated_GIFs",
+      "description": "Animated GIF media and short loop animations"
+    },
+    "Thumbnails": {
+      "directory_name": "Thumbnails",
+      "description": "Cached media thumbnails"
+    },
+    "Other": {
+      "directory_name": "Other",
+      "description": "Configuration, cache, logs, and unclassified files"
+    }
+  }
+}

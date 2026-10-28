@@ -1,0 +1,7 @@
+# WRS — WhatsApp Recovery Scanner Dependencies
+# Note: Core WRS functionality runs with Python 3.11+ standard library alone.
+# The following optional libraries enhance CLI formatting, file identification, and test execution.
+
+rich>=13.0.0
+python-magic>=0.4.27
+pytest>=7.0.0
