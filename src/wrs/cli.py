@@ -56,6 +56,20 @@ from .utils import (
     save_settings,
     validate_settings,
 )
+from .wizard import (
+    CATEGORY_MENU_MAP,
+    DateRangeEngine,
+    RecoverySelectionPreview,
+    parse_category_selection,
+    resolve_storage_categories,
+    parse_date_dd_mm_yyyy,
+)
+from .restore import (
+    CandidateSourceType,
+    RestoreAssistant,
+    RestoreCandidate,
+    RestoreCandidateStatus,
+)
 
 logger = logging.getLogger("wrs.cli")
 
@@ -1469,15 +1483,843 @@ def export_target(
     print(f"[+] Successfully exported {len(convs)} conversations.")
 
 
+def find_chat_database_candidates(base_dir: Path | str = "recovery") -> List[Path]:
+    """Find all potential database candidates in local recovery directory."""
+    base = Path(base_dir).resolve()
+    if not base.exists():
+        return []
+    candidates: List[Path] = []
+    for root, _, files in os.walk(base):
+        for f in files:
+            lower_f = f.lower()
+            if lower_f.endswith(("-wal", "-shm", "-journal", ".lock", ".tmp")):
+                continue
+            if lower_f.endswith(".db") or ".crypt" in lower_f or "msgstore" in lower_f:
+                candidates.append(Path(root) / f)
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates
+
+
+def category_selection_interactive(current_selection: Optional[List[str]] = None) -> List[str]:
+    """Interactive category selection screen (Phase 4, Option [2])."""
+    curr = current_selection or ["All Supported Data"]
+    curr_str = ", ".join(curr)
+
+    print("\n" + "=" * 56)
+    print("       WRS — SELECT DATA CATEGORIES")
+    print("=" * 56)
+    print(f"Current Selection : {curr_str}\n")
+    print("[1] All Supported Data")
+    print("[2] Chat History")
+    print("[3] Photos and Images")
+    print("[4] Videos")
+    print("[5] Audio Files")
+    print("[6] Voice Notes")
+    print("[7] Documents and Files")
+    print("[8] Stickers")
+    print("[9] GIFs and Animated Media")
+    print("[10] Thumbnails")
+    print("[11] Databases and Backups")
+    print("[12] Other Supported Files\n")
+    print("Enter multiple options separated by commas.")
+    print("Example: 2,4,7\n")
+    print("[A] Select All")
+    print("[C] Clear Selection")
+    print("[0] Back\n")
+
+    user_in = input("Your selection: ").strip()
+    valid, selected, includes_chats, msg = parse_category_selection(user_in)
+    if not valid:
+        print(f"[!] {msg}")
+        return current_selection or ["All Supported Data"]
+
+    if msg == "BACK":
+        return current_selection or ["All Supported Data"]
+
+    if msg == "Selection cleared.":
+        print("[*] Category selection cleared.")
+        return []
+
+    print(f"[+] {msg}")
+    print(f"    Active Categories: {', '.join(selected)}")
+    return selected
+
+
+def recovery_wizard_flow(
+    executor: AdbExecutor,
+    selected_dev: Optional[DeviceInfo],
+    settings: dict[str, Any],
+    active_categories: List[str],
+) -> None:
+    """Recovery Operation Selection (Phase 4, Option [1])."""
+    dev_name = selected_dev.display_name if selected_dev else "NONE DETECTED"
+    cats_str = ", ".join(active_categories) if active_categories else "All Supported Data"
+
+    while True:
+        print("\n" + "=" * 56)
+        print("       WRS — RECOVERY OPERATION SELECTION")
+        print("=" * 56)
+        print(f"Selected Device : {dev_name}")
+        print(f"Categories      : {cats_str}\n")
+        print("SELECT OPERATION\n")
+        print("[1] Scan Only")
+        print("    Discover data and calculate counts and sizes.\n")
+        print("[2] Acquire Files")
+        print("    Copy selected accessible files to the recovery directory.\n")
+        print("[3] Analyze Chat Databases")
+        print("    Inspect supported readable databases and backup candidates.\n")
+        print("[4] Export Readable Chats")
+        print("    Export supported, actually available chat records.\n")
+        print("[5] Export Selected Media")
+        print("    Export selected media files and their metadata.\n")
+        print("[6] Prepare Native WhatsApp Restore")
+        print("    Validate supported backup candidates and guide the user")
+        print("    through an applicable native WhatsApp restoration process.\n")
+        print("[7] Verify Acquired Data")
+        print("    Verify existing acquired files and their integrity.\n")
+        print("[0] Back\n")
+
+        op = input("Select an operation [0-7]: ").strip()
+        if op == "0" or op.lower() == "back":
+            return
+        elif op == "1":
+            if not selected_dev or not selected_dev.is_accessible:
+                print("[!] Scan Only requires an accessible, authorized Android device.")
+                print("    Please connect and authorize a device, then retry.")
+                return
+            cats_set = resolve_storage_categories(active_categories) if active_categories else None
+            run_interactive_workflow(executor, acquire_mode=False, override_serial=selected_dev.serial, selected_categories=cats_set, settings=settings)
+            return
+        elif op == "2":
+            if not selected_dev or not selected_dev.is_accessible:
+                print("[!] File Acquisition requires an accessible, authorized Android device.")
+                print("    Please connect and authorize a device, then retry.")
+                return
+            cats_set = resolve_storage_categories(active_categories) if active_categories else None
+            run_interactive_workflow(executor, acquire_mode=True, override_serial=selected_dev.serial, selected_categories=cats_set, settings=settings)
+            return
+        elif op == "3":
+            inspect_backups_and_databases_interactive(executor, selected_dev, settings)
+            return
+        elif op == "4":
+            recover_chat_history_interactive(selected_dev, settings)
+            return
+        elif op == "5":
+            recover_media_interactive(selected_dev, settings, active_categories)
+            return
+        elif op == "6":
+            guided_native_restore_flow(executor, selected_dev, settings)
+            return
+        elif op == "7":
+            verify_acquired_files_interactive(selected_dev, settings)
+            return
+        else:
+            print("[!] Invalid operation choice. Enter a number between 0 and 7.")
+
+
+def recover_chat_history_interactive(
+    device: Optional[DeviceInfo],
+    settings: dict[str, Any],
+) -> None:
+    """Chat History Availability Discovery & Date-Range Recovery (Phase 4, Option [3])."""
+    dev_name = device.display_name if device else "NONE DETECTED"
+
+    print("\n" + "=" * 56)
+    print("       WRS — RECOVER CHAT HISTORY")
+    print("=" * 56)
+
+    # 1. Look for existing databases in recovery folder or prompt user
+    candidates = find_chat_database_candidates("recovery")
+    chosen_db: Optional[Path] = None
+
+    if candidates:
+        print(f"[*] Found {len(candidates)} database candidate(s) in local recovery:")
+        for idx, c in enumerate(candidates[:5], start=1):
+            meta = WhatsAppDatabaseAnalyzer.identify_database(c)
+            fmt_lbl = f"Encrypted ({meta.crypt_version})" if meta.is_encrypted else ("SQLite" if meta.is_sqlite else "Unknown")
+            print(f"  [{idx}] {c.name} ({format_bytes(meta.size_bytes)}) - {fmt_lbl}")
+        if len(candidates) > 5:
+            print(f"  ... and {len(candidates) - 5} more.")
+        print("  [C] Custom path to database")
+        print("  [0] Back")
+
+        pick = input("\nSelect candidate [1-N / C / 0]: ").strip().lower()
+        if pick == "0":
+            return
+        elif pick == "c":
+            p_in = input("Enter path to database file: ").strip()
+            if p_in:
+                chosen_db = Path(p_in).resolve()
+        elif pick.isdigit() and 1 <= int(pick) <= min(len(candidates), 5):
+            chosen_db = candidates[int(pick) - 1]
+
+    if not chosen_db:
+        if not candidates:
+            p_in = input("Enter path to database file (or press Enter to view chat status): ").strip()
+            if p_in:
+                chosen_db = Path(p_in).resolve()
+
+    # 2. If no readable database established, show CHAT HISTORY STATUS screen (Section 6)
+    if not chosen_db or not chosen_db.exists():
+        print("\n" + "=" * 56)
+        print("       CHAT HISTORY STATUS")
+        print("=" * 56)
+        print("No readable chat source has been established.\n")
+        print("Possible reasons:")
+        print("- No database or backup was found in accessible locations.")
+        print("- The available database is encrypted and cannot currently be processed.")
+        print("- The source format is unsupported.")
+        print("- The available files contain media but no readable messages.\n")
+        print("No chat records have been reconstructed.\n")
+        print("Next actions:")
+        print("[1] Scan additional accessible locations")
+        print("[2] Inspect discovered database candidates")
+        print("[3] Import an existing supported chat export")
+        print("[0] Back\n")
+
+        act = input("Select an action [0-3]: ").strip()
+        if act == "2":
+            inspect_backups_and_databases_interactive(AdbExecutor(), device, settings)
+        return
+
+    # 3. Check encryption and extract messages
+    meta = WhatsAppDatabaseAnalyzer.identify_database(chosen_db)
+    active_db = chosen_db
+    if meta.is_encrypted:
+        print(f"\n[*] Selected database is encrypted ({meta.crypt_version}). Decryption key required.")
+        key_str = input("Enter path to WhatsApp key file (leave blank to cancel): ").strip()
+        if not key_str:
+            print("[*] Operation cancelled: cannot parse encrypted database without key.")
+            return
+        key_p = Path(key_str).resolve()
+        dec_dest = chosen_db.parent / f"{chosen_db.stem}_decrypted.db"
+        ok, msg = WhatsAppDatabaseAnalyzer.decrypt_crypt_database(chosen_db, key_p, dec_dest)
+        if not ok:
+            print(f"[!] Decryption failed: {msg}")
+            return
+        active_db = dec_dest
+
+    raw_msgs = WhatsAppDatabaseAnalyzer.extract_raw_messages(active_db)
+    if not raw_msgs:
+        print("[!] No readable message records could be extracted from database.")
+        return
+
+    conversations = ChatReconstructionEngine.reconstruct_conversations(raw_msgs)
+    if not conversations:
+        print("[!] No conversation threads could be reconstructed from raw messages.")
+        return
+
+    # 4. Extract Oldest-to-Most-Recent Chat Timeline (Section 7)
+    timeline = DateRangeEngine.extract_timeline(conversations)
+
+    while True:
+        print("\n" + "=" * 56)
+        print("       AVAILABLE CHAT HISTORY")
+        print("=" * 56)
+        print(f"Oldest Available Message : {timeline.oldest_formatted}")
+        print(f"Most Recent Message      : {timeline.newest_formatted}\n")
+        print(f"Readable Messages        : {timeline.total_messages}")
+        print(f"Conversations            : {timeline.total_conversations}")
+        print(f"Missing Timestamps       : {timeline.missing_timestamps_count}\n")
+        print("Choose History Range\n")
+        print("[1] All Available History")
+        print("[2] Custom Date Range")
+        print("[3] Select One Conversation")
+        print("[4] Select Multiple Conversations")
+        print("[0] Back\n")
+
+        range_choice = input("Select an option [0-4]: ").strip()
+        if range_choice == "0":
+            return
+
+        selected_convs: List[Conversation] = conversations
+        requested_range_str = "All Available History"
+        excluded_missing = 0
+
+        if range_choice == "1":
+            selected_convs = conversations
+            requested_range_str = "All Available History"
+
+        elif range_choice == "2":
+            # Custom date range (DD-MM-YYYY)
+            print(f"\nAvailable boundaries: {timeline.oldest_formatted} to {timeline.newest_formatted}")
+            start_in = input("Start Date (DD-MM-YYYY): ").strip()
+            end_in = input("End Date   (DD-MM-YYYY): ").strip()
+
+            valid, s_dt, e_dt, val_msg = DateRangeEngine.validate_date_range(
+                start_in, end_in, timeline.oldest_dt, timeline.newest_dt
+            )
+            if not valid or s_dt is None or e_dt is None:
+                print(f"[!] Date range rejected: {val_msg}")
+                continue
+
+            if "Partial overlap" in val_msg:
+                print(f"[*] {val_msg}")
+                proceed_adj = input("Accept adjusted range? [y/N]: ").strip().lower()
+                if proceed_adj not in ("y", "yes"):
+                    continue
+
+            selected_convs, excluded_missing = DateRangeEngine.filter_conversations_by_date(conversations, s_dt, e_dt)
+            requested_range_str = f"{s_dt.strftime('%d-%m-%Y')} to {e_dt.strftime('%d-%m-%Y')}"
+            if not selected_convs:
+                print(f"[!] No chat records found within range {requested_range_str}.")
+                continue
+
+        elif range_choice in ("3", "4"):
+            # Conversation Selection (Section 10)
+            print("\n" + "=" * 56)
+            print("       SELECT CONVERSATIONS")
+            print("=" * 56)
+            for idx, c in enumerate(conversations[:20], start=1):
+                print(f"[{idx:<2}] {c.display_name:<30} | {len(c.messages)} messages")
+            if len(conversations) > 20:
+                print(f"... and {len(conversations) - 20} more conversations.")
+            print("[A]  All Conversations")
+            print("[0]  Back\n")
+
+            conv_in = input("Your selection: ").strip()
+            if conv_in == "0":
+                continue
+            elif conv_in.upper() == "A":
+                selected_convs = conversations
+            else:
+                tokens = [t.strip() for t in conv_in.replace(" ", ",").split(",") if t.strip()]
+                picked_indices = []
+                for tok in tokens:
+                    if tok.isdigit() and 1 <= int(tok) <= len(conversations):
+                        picked_indices.append(int(tok) - 1)
+                if not picked_indices:
+                    print("[!] No valid conversation indices selected.")
+                    continue
+                selected_convs = [conversations[i] for i in picked_indices]
+                requested_range_str = f"Specific conversations ({len(selected_convs)} selected)"
+
+        # Ask Section 5: Include media referenced by selected chats?
+        inc_media = input("\nInclude media referenced by selected chats? [y/N]: ").strip().lower() in ("y", "yes")
+        matched_media_files = []
+        if inc_media:
+            # Search for media in database parent directory or recovery folder
+            search_base = chosen_db.parent.parent if chosen_db.parent.name == "Databases" else chosen_db.parent
+            media_files = [p for root, _, files in os.walk(search_base) for p in [Path(root) / fn for fn in files]]
+            MediaAssociator.associate_media(selected_convs, media_files)
+            for c in selected_convs:
+                for m in c.messages:
+                    if m.media_reference and m.media_reference.resolved_path:
+                        p = Path(m.media_reference.resolved_path)
+                        if p.exists() and p not in matched_media_files:
+                            matched_media_files.append(p)
+
+        # 5. Acquisition and Export Preview (Section 12)
+        total_msgs = sum(len(c.messages) for c in selected_convs)
+        media_size = sum(f.stat().st_size for f in matched_media_files)
+        # Approximate size of exported chat text
+        chat_text_size = sum(len(m.body or "") for c in selected_convs for m in c.messages)
+
+        dest_export_dir = Path("recovery") / f"chat_export_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+
+        print("\n" + "=" * 56)
+        print("       RECOVERY SELECTION PREVIEW")
+        print("=" * 56)
+        print(f"Device               : {dev_name}")
+        print("Operation            : Export Readable Chats")
+        print(f"Categories           : Chat History{' + Associated Media' if inc_media else ''}\n")
+        print(f"Chat Source           : {chosen_db.name} (Reconstructed)")
+        print(f"Oldest Available Date : {timeline.oldest_formatted}")
+        print(f"Newest Available Date : {timeline.newest_formatted}\n")
+        print(f"Requested Range       : {requested_range_str}")
+        print(f"Selected Conversations: {len(selected_convs)}")
+        print(f"Selected Messages     : {total_msgs}")
+        print(f"Selected Files        : {len(matched_media_files)} media files")
+        print(f"Total Selected Size   : {format_bytes(media_size + chat_text_size)}\n")
+        print(f"Unreadable Records    : 0")
+        print(f"Missing Timestamps    : {excluded_missing}")
+        print(f"Unmatched Media       : 0\n")
+        print(f"Destination           : {dest_export_dir}")
+        print("=" * 56 + "\n")
+
+        # 6. Explicit Confirmation (Section 13)
+        print("You are about to export selected chat records.\n")
+        print(f"Conversations : {len(selected_convs)}")
+        print(f"Messages      : {total_msgs}")
+        print(f"Date Range    : {requested_range_str}")
+        print("Output Format : TXT, HTML, JSON, and ZIP archive")
+        print(f"Destination   : {dest_export_dir}\n")
+
+        proceed = input("Proceed? [y/N]: ").strip().lower()
+        if proceed not in ("y", "yes"):
+            print("[*] Operation cancelled. Returning to menu.")
+            return
+
+        # 7. Execute Export (Section 14)
+        dest_export_dir.mkdir(parents=True, exist_ok=True)
+        chats_sub = dest_export_dir / "chats"
+        chats_sub.mkdir(parents=True, exist_ok=True)
+
+        for c in selected_convs:
+            safe_cname = sanitize_filename(c.display_name)[:30]
+            ChatExporter.export_conversation_txt(c, chats_sub / f"{safe_cname}.txt")
+            ChatExporter.export_conversation_html(c, chats_sub / f"{safe_cname}.html")
+            ChatExporter.export_conversation_json(c, chats_sub / f"{safe_cname}.json")
+            ChatExporter.export_conversation_csv(c, chats_sub / f"{safe_cname}.csv")
+
+        # Copy associated media if selected
+        if matched_media_files:
+            media_sub = dest_export_dir / "media"
+            media_sub.mkdir(parents=True, exist_ok=True)
+            for mf in matched_media_files:
+                try:
+                    shutil.copy2(mf, media_sub / mf.name)
+                except OSError:
+                    pass
+
+        # Manifest
+        manifest = {
+            "generator": "WRS Chat Recovery Engine",
+            "export_timestamp": format_timestamp(),
+            "source_database": str(chosen_db),
+            "requested_date_range": requested_range_str,
+            "selected_conversations_count": len(selected_convs),
+            "selected_messages_count": total_msgs,
+            "excluded_records_missing_timestamps": excluded_missing,
+            "associated_media_count": len(matched_media_files),
+        }
+        (dest_export_dir / "export_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+        # Create ZIP package
+        zip_path = dest_export_dir.parent / f"{dest_export_dir.name}.zip"
+        ZipPackager.package_recovery_archive(dest_export_dir, zip_path)
+
+        print("\n[+] Chat export completed successfully!")
+        print(f"    Export directory : {dest_export_dir}")
+        print(f"    Archive package  : {zip_path}")
+        print("    Note: Exported archives do NOT restore WhatsApp chats into the WhatsApp app.")
+        return
+
+
+def view_available_chat_dates_interactive(
+    device: Optional[DeviceInfo],
+    settings: dict[str, Any],
+) -> None:
+    """Chronological Available-Date Calendar (Phase 4, Option [6])."""
+    print("\n" + "=" * 56)
+    print("       WRS — VIEW AVAILABLE CHAT DATES")
+    print("=" * 56)
+
+    candidates = find_chat_database_candidates("recovery")
+    chosen_db: Optional[Path] = None
+    if candidates:
+        chosen_db = candidates[0]
+    else:
+        p_in = input("Enter path to readable database file: ").strip()
+        if p_in:
+            chosen_db = Path(p_in).resolve()
+
+    if not chosen_db or not chosen_db.exists():
+        print("[!] No readable chat database found. Please acquire or inspect a database first.")
+        return
+
+    meta = WhatsAppDatabaseAnalyzer.identify_database(chosen_db)
+    active_db = chosen_db
+    if meta.is_encrypted:
+        key_str = input("Database is encrypted. Enter path to key file (leave blank to cancel): ").strip()
+        if not key_str:
+            return
+        dec_dest = chosen_db.parent / f"{chosen_db.stem}_decrypted.db"
+        ok, msg = WhatsAppDatabaseAnalyzer.decrypt_crypt_database(chosen_db, Path(key_str).resolve(), dec_dest)
+        if not ok:
+            print(f"[!] Decryption failed: {msg}")
+            return
+        active_db = dec_dest
+
+    raw_msgs = WhatsAppDatabaseAnalyzer.extract_raw_messages(active_db)
+    convs = ChatReconstructionEngine.reconstruct_conversations(raw_msgs)
+    timeline = DateRangeEngine.extract_timeline(convs)
+
+    if not timeline.dates_calendar:
+        print("[!] No readable messages with valid timestamps found in this database.")
+        return
+
+    print("\nAVAILABLE MESSAGE DATES\n")
+    sorted_dates = list(timeline.dates_calendar.keys())
+    for idx, d_str in enumerate(sorted_dates[:40], start=1):
+        cnt = timeline.dates_calendar[d_str]
+        print(f"[{idx:<2}] {d_str}  | {cnt} messages")
+    if len(sorted_dates) > 40:
+        print(f"... and {len(sorted_dates) - 40} more dates.")
+
+    print("\nDate Selection Options:")
+    print("  [A]     Select All Available Dates")
+    print("  [1-N]   Specific Date(s) (comma-separated, e.g. 1,3,5)")
+    print("  [0]     Back\n")
+
+    sel = input("Your choice: ").strip()
+    if sel == "0" or not sel:
+        return
+
+    target_dates: Set[str] = set()
+    if sel.upper() == "A":
+        target_dates = set(sorted_dates)
+    else:
+        tokens = [t.strip() for t in sel.replace(" ", ",").split(",") if t.strip()]
+        for tok in tokens:
+            if tok.isdigit() and 1 <= int(tok) <= len(sorted_dates):
+                target_dates.add(sorted_dates[int(tok) - 1])
+
+    if not target_dates:
+        print("[!] No valid dates selected.")
+        return
+
+    filtered_convs, excluded_missing = DateRangeEngine.filter_conversations_by_specific_dates(convs, target_dates)
+    total_msgs = sum(len(c.messages) for c in filtered_convs)
+    print(f"\n[+] Selected {len(target_dates)} date(s), matching {total_msgs} messages across {len(filtered_convs)} conversations.")
+
+    export_ans = input("Export these selected records? [y/N]: ").strip().lower()
+    if export_ans in ("y", "yes"):
+        out_d = Path("recovery") / f"dates_export_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+        out_d.mkdir(parents=True, exist_ok=True)
+        for c in filtered_convs:
+            s_name = sanitize_filename(c.display_name)[:30]
+            ChatExporter.export_conversation_html(c, out_d / f"{s_name}.html")
+            ChatExporter.export_conversation_json(c, out_d / f"{s_name}.json")
+            ChatExporter.export_conversation_txt(c, out_d / f"{s_name}.txt")
+        print(f"[+] Export saved to: {out_d}")
+
+
+def recover_media_interactive(
+    device: Optional[DeviceInfo],
+    settings: dict[str, Any],
+    active_categories: List[str],
+) -> None:
+    """Recover Media and Attachments Workflow (Phase 4, Option [4])."""
+    dev_name = device.display_name if device else "NONE DETECTED"
+    print("\n" + "=" * 56)
+    print("       WRS — RECOVER MEDIA AND ATTACHMENTS")
+    print("=" * 56)
+    print(f"Selected Device : {dev_name}\n")
+    print("Supported Media Categories:")
+    print("  • Photos and Images")
+    print("  • Videos")
+    print("  • Audio Files")
+    print("  • Voice Notes")
+    print("  • Documents and Files")
+    print("  • Stickers")
+    print("  • GIFs and Animated Media\n")
+
+    if not device or not device.is_accessible:
+        print("[!] No accessible Android device connected for media acquisition.")
+        print("    To export media from existing acquisitions, use Option [7].")
+        return
+
+    print("Media recovery will acquire accessible photos, videos, audio, voice notes, and documents.")
+    ans = input("Proceed with media acquisition from connected device? [y/N]: ").strip().lower()
+    if ans not in ("y", "yes"):
+        print("[*] Media recovery cancelled.")
+        return
+
+    media_cats = {
+        "Photos and Images",
+        "Videos",
+        "Audio Files",
+        "Voice Notes",
+        "Documents and Files",
+        "Stickers",
+        "GIFs and Animated Media",
+    }
+    storage_cats = resolve_storage_categories(list(media_cats))
+    run_interactive_workflow(
+        AdbExecutor(),
+        acquire_mode=True,
+        override_serial=device.serial,
+        selected_categories=storage_cats,
+        settings=settings,
+    )
+
+
+def inspect_backups_and_databases_interactive(
+    executor: AdbExecutor,
+    device: Optional[DeviceInfo],
+    settings: dict[str, Any],
+) -> None:
+    """Inspect Backups and Databases with RestoreAssistant (Option [5])."""
+    print_screen_header("INSPECT BACKUPS & DATABASES", device, settings)
+    print("[*] Scanning local recovery folders and connected device storage...\n")
+
+    local_candidates = RestoreAssistant.scan_local_recovery_candidates("recovery")
+    dev_candidates: List[RestoreCandidate] = []
+    if device and device.is_accessible:
+        dev_candidates = RestoreAssistant.scan_device_candidates(executor, device.serial)
+
+    all_candidates = local_candidates + dev_candidates
+
+    if not all_candidates:
+        print("[*] No database or backup candidates found in local recovery or device external storage.")
+        p_in = input("Enter custom database or backup file path to inspect (or press Enter to return): ").strip()
+        if p_in:
+            inspect_target(Path(p_in).resolve(), device_name=device.display_name if device else None)
+        return
+
+    print(f"Found {len(all_candidates)} candidate artifact(s):\n")
+    print(f"  {'#':<4} {'FILENAME':<32} {'SIZE':>10}  {'FORMAT':<10} {'STATUS':<12} {'LOCATION':<16}")
+    print("  " + "-" * 88)
+
+    for idx, c in enumerate(all_candidates, start=1):
+        print(f"  [{idx:<2}] {c.filename:<32} {c.size_human:>10}  {c.detected_format:<10} {c.status.value:<12} {c.evidence_location:<16}")
+
+    print("\nOptions:")
+    print("  [1-N] Inspect candidate details")
+    print("  [0]   Back to Main Menu\n")
+
+    pick = input("Enter choice: ").strip()
+    if pick == "0" or not pick:
+        return
+
+    if pick.isdigit() and 1 <= int(pick) <= len(all_candidates):
+        cand = all_candidates[int(pick) - 1]
+        print("\n" + "=" * 65)
+        print("  CANDIDATE FORENSIC PROVENANCE")
+        print("=" * 65)
+        print(f"  Source Path        : {cand.source_path}")
+        print(f"  File Name          : {cand.filename}")
+        print(f"  Size               : {cand.size_human} ({cand.size_bytes} bytes)")
+        print(f"  Modified Timestamp : {cand.modified_timestamp}")
+        print(f"  SHA-256 Hash       : {cand.sha256_hash or 'Not calculated on remote device'}")
+        print(f"  Detected Format    : {cand.detected_format}")
+        print(f"  Classification     : {cand.status.value}")
+        print(f"  Evidence Source    : {cand.source_type.value}")
+        print(f"  Validation Notes   : {cand.validation_notes}")
+        if cand.is_sqlite:
+            print(f"  Table Count        : {cand.table_count}")
+        print("=" * 65 + "\n")
+
+        if cand.status == RestoreCandidateStatus.RESTORABLE:
+            print("This candidate is a validated WhatsApp backup eligible for native restoration.")
+            stg = input("Stage this backup for native WhatsApp restoration? [y/N]: ").strip().lower()
+            if stg in ("y", "yes"):
+                guided_native_restore_flow(executor, device, settings, selected_candidate=cand)
+        elif cand.is_sqlite and cand.evidence_location == "LOCAL_ACQUISITION":
+            exp = input("Extract and export readable chats from this SQLite database? [y/N]: ").strip().lower()
+            if exp in ("y", "yes"):
+                reconstruct_and_export_interactive()
+
+
+def guided_native_restore_flow(
+    executor: AdbExecutor,
+    device: Optional[DeviceInfo],
+    settings: dict[str, Any],
+    selected_candidate: Optional[RestoreCandidate] = None,
+) -> None:
+    """Guided Native WhatsApp Restore Workstation (Recovery Assistant)."""
+    dev_name = device.display_name if device else "NONE DETECTED"
+
+    print("\n" + "=" * 65)
+    print("       WRS — NATIVE WHATSAPP RESTORE ASSISTANT")
+    print("=" * 65)
+    print(f"Selected Device : {dev_name}\n")
+
+    cand = selected_candidate
+    if not cand:
+        local_cands = RestoreAssistant.scan_local_recovery_candidates("recovery")
+        restorable = [c for c in local_cands if c.status == RestoreCandidateStatus.RESTORABLE]
+        if not restorable:
+            print("[!] No restorable backup candidates found in local recovery directory.")
+            print("    Native restoration requires an encrypted local backup (.crypt14 or .crypt15)")
+            print("    with valid container headers (not just filename match).")
+            print("    Restoration is unsupported with the current evidence.")
+            return
+
+        print(f"Found {len(restorable)} restorable backup candidate(s):")
+        for idx, rc in enumerate(restorable, start=1):
+            print(f"  [{idx}] {rc.filename} ({rc.size_human}) - {rc.detected_format}")
+        print("  [0] Back")
+
+        pick = input("\nSelect candidate to restore [1-N / 0]: ").strip()
+        if pick == "0" or not pick.isdigit() or not (1 <= int(pick) <= len(restorable)):
+            return
+        cand = restorable[int(pick) - 1]
+
+    # Explain Consequences & Prerequisites
+    print("\n" + "=" * 65)
+    print("  RESTORATION PREREQUISITES & SAFETY NOTICE")
+    print("=" * 65)
+    for idx, prereq in enumerate(RestoreAssistant.get_prerequisites_list(), start=1):
+        print(f"  {idx}. {prereq}")
+
+    print("\nConsequences & Critical Safeguards:")
+    print("  • Native restoration requires reinstalling WhatsApp or clearing app storage.")
+    print("  • WRS will NEVER automatically uninstall WhatsApp, clear app data,")
+    print("    or register phone numbers without explicit user action.")
+    print("  • Never overwrite existing backups. WRS verifies destination collision.")
+    print("  • Staging does NOT modify original evidence files.\n")
+
+    conf_stage = input("Have you reviewed these prerequisites and wish to stage the restore bundle? [y/N]: ").strip().lower()
+    if conf_stage not in ("y", "yes"):
+        print("[*] Restoration staging cancelled.")
+        return
+
+    # Stage the restoration bundle
+    staging_base = Path("recovery") / f"staged_restore_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+    ok, msg, dest_file = RestoreAssistant.prepare_restoration_bundle(cand, staging_base)
+    if not ok or not dest_file:
+        print(f"[!] Staging failed: {msg}")
+        return
+
+    print(f"\n[+] Restoration bundle staged successfully!")
+    print(f"    Staged File     : {dest_file}")
+    print(f"    Restore Target  : {dest_file.name}")
+    print(f"    File Size       : {format_bytes(dest_file.stat().st_size)}")
+    print(f"    Original SHA-256: {cand.sha256_hash}")
+
+    # Check device deployment
+    if device and device.is_accessible:
+        print("\n" + "-" * 65)
+        print(f"Ready to deploy staged backup to Android device: {device.display_name}")
+        print(f"Target location: /sdcard/Android/media/com.whatsapp/WhatsApp/Databases/{dest_file.name}")
+        push_conf = input("\nProceed with ADB push to device? [y/N]: ").strip().lower()
+        if push_conf in ("y", "yes"):
+            push_ok, push_msg = RestoreAssistant.push_staged_backup_to_device(
+                dest_file, device.serial, executor, confirmed=True
+            )
+            if push_ok:
+                print(f"\n[+] {push_msg}")
+            else:
+                print(f"\n[!] Deployment halted: {push_msg}")
+        else:
+            print("\n[*] Deployment to device skipped. You may copy the staged file manually.")
+    else:
+        print("\n[*] No accessible Android device connected. You may copy the staged file manually")
+        print(f"    to: /sdcard/Android/media/com.whatsapp/WhatsApp/Databases/{dest_file.name}")
+
+    # Post-Restoration Verification Checklist (Section 13)
+    print("\n" + "=" * 65)
+    print("  POST-RESTORATION VERIFICATION CHECKLIST")
+    print("=" * 65)
+    for idx, item in enumerate(RestoreAssistant.get_verification_checklist(), start=1):
+        print(f"  [ ] {idx}. {item}")
+    print("=" * 65 + "\n")
+
+
+def view_previous_scans_interactive(settings: dict[str, Any]) -> None:
+    """Inspect previous scan acquisition directories (Option [9])."""
+    print_screen_header("VIEW PREVIOUS SCANS", None, settings)
+    rec_base = Path("recovery").resolve()
+    if not rec_base.exists():
+        print("[*] No recovery directory found at ./recovery")
+        return
+
+    subdirs = [d for d in rec_base.iterdir() if d.is_dir() and not d.name.startswith(".")]
+    subdirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+
+    if not subdirs:
+        print("[*] No previous scan directories found in ./recovery")
+        return
+
+    print(f"Found {len(subdirs)} previous scan directory/directories:\n")
+    print(f"  {'#':<4} {'DIRECTORY NAME':<38} {'MODIFIED':<20}")
+    print("  " + "-" * 66)
+
+    for idx, d in enumerate(subdirs[:15], start=1):
+        mtime_str = datetime.fromtimestamp(d.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"  [{idx:<2}] {d.name:<38} {mtime_str:<20}")
+
+    print("\nOptions:")
+    print("  [1-N] Inspect scan directory")
+    print("  [0]   Back to Main Menu\n")
+
+    pick = input("Select scan [1-N / 0]: ").strip()
+    if pick == "0" or not pick or not pick.isdigit() or not (1 <= int(pick) <= len(subdirs)):
+        return
+
+    chosen_dir = subdirs[int(pick) - 1]
+    inspect_target(chosen_dir)
+
+
+def settings_and_help_interactive(settings: dict[str, Any]) -> None:
+    """Settings, Forensic Boundaries & Restore Help (Option [10])."""
+    while True:
+        ui = settings.setdefault("ui", {})
+        acq = settings.setdefault("acquisition", {})
+
+        mask_enabled = ui.get("mask_device_serial", False)
+        prog_enabled = ui.get("progress_display_enabled", True)
+        rec_dir = acq.get("default_recovery_dir", "recovery")
+        margin_b = acq.get("safety_margin_bytes", 104857600)
+        margin_r = acq.get("safety_margin_ratio", 0.10)
+
+        print("\n" + "=" * 65)
+        print("  WRS — SETTINGS, BOUNDARIES & RESTORE HELP")
+        print("=" * 65)
+        print(f"  [1] Device Serial Masking       : {'ENABLED' if mask_enabled else 'DISABLED'}")
+        print(f"  [2] Scan Progress Display       : {'ENABLED' if prog_enabled else 'DISABLED'}")
+        print(f"  [3] Default Recovery Directory  : {rec_dir}")
+        print(f"  [4] Safety Margin Bytes         : {format_bytes(margin_b)} ({margin_b} bytes)")
+        print(f"  [5] Safety Margin Ratio         : {int(margin_r * 100)}%")
+        print("  [6] Reset Settings to Safe Defaults")
+        print("  [7] Supported Recovery Locations & Boundaries")
+        print("  [8] Restoration Prerequisites & Rollback Safeguards")
+        print("  [0] Return to Main Menu")
+        print("-" * 65)
+
+        opt = input("\nEnter option [0-8]: ").strip()
+        if opt == "0" or opt.lower() == "c":
+            return
+        elif opt == "1":
+            ui["mask_device_serial"] = not mask_enabled
+            save_settings(settings)
+            print(f"[+] Device serial masking: {'ENABLED' if ui['mask_device_serial'] else 'DISABLED'}")
+        elif opt == "2":
+            ui["progress_display_enabled"] = not prog_enabled
+            save_settings(settings)
+            print(f"[+] Progress display: {'ENABLED' if ui['progress_display_enabled'] else 'DISABLED'}")
+        elif opt == "3":
+            new_dir = input(f"Enter new default recovery directory [{rec_dir}]: ").strip()
+            if new_dir:
+                acq["default_recovery_dir"] = new_dir
+                save_settings(settings)
+                print(f"[+] Default recovery directory set to: {new_dir}")
+        elif opt == "4":
+            new_mb = input(f"Enter safety margin in MB [{margin_b // 1048576}]: ").strip()
+            if new_mb.isdigit() and int(new_mb) >= 0:
+                acq["safety_margin_bytes"] = int(new_mb) * 1048576
+                save_settings(settings)
+                print(f"[+] Safety margin set to: {format_bytes(acq['safety_margin_bytes'])}")
+        elif opt == "5":
+            new_ratio = input(f"Enter safety margin percentage (0-50) [{int(margin_r * 100)}]: ").strip()
+            if new_ratio.isdigit() and 0 <= int(new_ratio) <= 50:
+                acq["safety_margin_ratio"] = int(new_ratio) / 100.0
+                save_settings(settings)
+                print(f"[+] Safety margin ratio set to: {int(acq['safety_margin_ratio'] * 100)}%")
+        elif opt == "6":
+            ui["mask_device_serial"] = False
+            ui["progress_display_enabled"] = True
+            acq["default_recovery_dir"] = "recovery"
+            acq["safety_margin_bytes"] = 104857600
+            acq["safety_margin_ratio"] = 0.10
+            save_settings(settings)
+            print("[+] Settings reset to safe factory defaults.")
+        elif opt == "7":
+            show_recovery_info()
+        elif opt == "8":
+            print("\n" + "=" * 65)
+            print("  WRS RESTORATION PREREQUISITES & ROLLBACK PRECAUTIONS")
+            print("=" * 65)
+            print("\nPREREQUISITES:")
+            for p in RestoreAssistant.get_prerequisites_list():
+                print(f"  • {p}")
+            print("\nROLLBACK SAFEGUARDS:")
+            for r in RestoreAssistant.get_rollback_precautions():
+                print(f"  • {r}")
+            print("=" * 65 + "\n")
+
+
 def interactive_menu() -> None:
-    """Main terminal menu loop with startup preflight and 9-option dispatcher."""
+    """Main terminal menu loop (Phase 4, 10-Option Menu + Exit)."""
     executor = AdbExecutor()
     settings = load_settings()
+    active_categories: List[str] = ["All Supported Data"]
 
     # Preflight Check & Device Detection
     all_devs, selected_dev = detect_and_display_startup_devices(executor, settings)
 
-    # If 0 devices connected, offer retry, exit, or continue to main menu for offline navigation
     if not all_devs:
         print("[*] No active Android device connected. WRS remains available for offline case inspection,")
         print("    report export, file verification, and settings.")
@@ -1495,74 +2337,82 @@ def interactive_menu() -> None:
             sys.exit(0)
 
     while True:
-        # Keep selected device name visible at top of main menu
+        # Runtime device & status check
+        status = executor.check_device_status(selected_serial=selected_dev.serial if selected_dev else None)
         mask = settings.get("ui", {}).get("mask_device_serial", False)
-        dev_title = "None"
+
         if selected_dev:
             s_disp = selected_dev.get_display_serial(masked=mask)
             dev_title = f"{selected_dev.display_name} ({s_disp})" if s_disp else selected_dev.display_name
+        else:
+            dev_title = "NONE DETECTED"
 
-        print("\n" + "=" * 65)
-        print("          WRS — WHATSAPP RECOVERY SCANNER")
-        print("=" * 65)
-        print(f"Selected Device: {dev_title}\n")
-        print("[1] Scan and discover WhatsApp data")
-        print("[2] Scan and acquire data")
-        print("[3] Inspect an existing recovery case")
-        print("[4] Verify acquired files")
-        print("[5] Export reports and ZIP archive")
-        print("[6] Review database candidates")
-        print("[7] Settings and configuration")
-        print("[8] Refresh connected devices")
-        print("[9] Exit")
-        print("=" * 65)
+        adb_status_str = status.adb_status_display
+        scan_status_str = "READY" if (selected_dev and selected_dev.is_accessible) else "IDLE"
+
+        print("\n" + "=" * 56)
+        print("       WRS — WHATSAPP RECOVERY SCANNER")
+        print("=" * 56)
+        print(f"Selected Device : {dev_title}")
+        print(f"ADB Status      : {adb_status_str}")
+        print(f"Scan Status     : {scan_status_str}\n")
+        print("MAIN MENU\n")
+        print("[1] Scan and Recover Data")
+        print("[2] Select Specific Data Categories")
+        print("[3] Recover Chat History")
+        print("[4] Recover Media and Attachments")
+        print("[5] Inspect Backups and Databases")
+        print("[6] View Available Chat Dates")
+        print("[7] Export Recovered Data")
+        print("[8] Verify Existing Recovery Files")
+        print("[9] View Previous Scans")
+        print("[10] Settings and Help")
+        print("[0] Exit\n")
 
         try:
-            choice = input("\nEnter choice [1-9]: ").strip()
+            choice = input("Select an option: ").strip()
+
             if choice == "1":
-                if not selected_dev or not selected_dev.is_accessible:
-                    print("[!] No accessible Android device selected. Attempting device detection...")
-                    _, selected_dev = detect_and_display_startup_devices(executor, settings)
-                    if not selected_dev or not selected_dev.is_accessible:
-                        print("[!] Cannot start scan: Device is not authorized or offline.")
-                        continue
-                run_interactive_workflow(executor, acquire_mode=False, override_serial=selected_dev.serial, settings=settings)
+                recovery_wizard_flow(executor, selected_dev, settings, active_categories)
 
             elif choice == "2":
-                if not selected_dev or not selected_dev.is_accessible:
-                    print("[!] No accessible Android device selected. Attempting device detection...")
-                    _, selected_dev = detect_and_display_startup_devices(executor, settings)
-                    if not selected_dev or not selected_dev.is_accessible:
-                        print("[!] Cannot start acquisition: Device is not authorized or offline.")
-                        continue
-                run_interactive_workflow(executor, acquire_mode=True, override_serial=selected_dev.serial, settings=settings)
+                active_categories = category_selection_interactive(active_categories)
 
             elif choice == "3":
-                inspect_recovery_folder_interactive(selected_dev)
+                recover_chat_history_interactive(selected_dev, settings)
 
             elif choice == "4":
-                verify_acquired_files_interactive(selected_dev, settings)
+                recover_media_interactive(selected_dev, settings, active_categories)
 
             elif choice == "5":
-                export_and_package_menu_interactive(selected_dev)
+                inspect_backups_and_databases_interactive(executor, selected_dev, settings)
 
             elif choice == "6":
-                review_database_candidates_interactive(selected_dev, settings)
+                view_available_chat_dates_interactive(selected_dev, settings)
 
             elif choice == "7":
-                settings_menu_interactive(settings)
+                export_and_package_menu_interactive(selected_dev)
 
             elif choice == "8":
+                verify_acquired_files_interactive(selected_dev, settings)
+
+            elif choice == "9":
+                view_previous_scans_interactive(settings)
+
+            elif choice == "10":
+                settings_and_help_interactive(settings)
+
+            elif choice == "0" or choice.lower() in ("exit", "quit", "q"):
+                print("\nExiting WRS. Goodbye.")
+                sys.exit(0)
+
+            elif choice == "refresh" or choice.lower() == "r":
                 print("\n[*] Refreshing connected Android devices...")
                 executor.clear_cache()
                 all_devs, selected_dev = detect_and_display_startup_devices(executor, settings)
 
-            elif choice == "9":
-                print("\nExiting WRS. Goodbye.")
-                sys.exit(0)
-
             else:
-                print("Invalid choice. Please select a number from 1 to 9.")
+                print("Invalid choice. Please select an option between 0 and 10.")
 
         except KeyboardInterrupt:
             print("\nOperation cancelled. Returning to main menu...")

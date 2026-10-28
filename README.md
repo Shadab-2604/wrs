@@ -196,350 +196,350 @@ Selected Device  : Google Pixel 7
 ==============================================================
 ```
 
-### 9-Option Main Menu
+### 10-Option Main Menu (Phase 4)
 
 ```text
-==============================================================
-          WRS — WHATSAPP RECOVERY SCANNER
-==============================================================
-Selected Device: Google Pixel 7 (2824****06G7)
+========================================================
+       WRS — WHATSAPP RECOVERY SCANNER
+========================================================
 
-[1] Scan and discover WhatsApp data
-[2] Scan and acquire data
-[3] Inspect an existing recovery case
-[4] Verify acquired files
-[5] Export reports and ZIP archive
-[6] Review database candidates
-[7] Settings and configuration
-[8] Refresh connected devices
-[9] Exit
-==============================================================
+Selected Device : Google Pixel 7 (2824****06G7)
+ADB Status      : AVAILABLE (version 1.0.41)
+Scan Status     : READY
+
+MAIN MENU
+
+[1] Scan and Recover Data
+[2] Select Specific Data Categories
+[3] Recover Chat History
+[4] Recover Media and Attachments
+[5] Inspect Backups and Databases
+[6] View Available Chat Dates
+[7] Export Recovered Data
+[8] Verify Existing Recovery Files
+[9] View Previous Scans
+[10] Settings and Help
+[0] Exit
+
+Select an option:
 ```
 
 ---
 
-## 6. Comprehensive Option Guide & Expected Terminal Outputs
+## 6. Comprehensive Option Guide & Workflows
 
-### Option [1]: Scan and Discover WhatsApp Data (Inventory-Only Mode)
-**Purpose:** Performs a non-invasive, read-only inventory scan of accessible WhatsApp storage locations without copying any files from the device. Categorizes all assets, calculates total bytes, saves entries into `scan_inventory.db`, and exports inventory catalogs (`report.html`, `report.csv`, `report.json`).
+### Option [1]: Scan and Recover Data (Recovery Operation Selection Wizard)
+**Purpose:** Central entry point to the complete Phase 4 Recovery Selection Wizard. Guides the examiner through selecting the exact operation type to perform:
 
-**How to Use:**
-1. Type `1` at the main menu and press **Enter**.
-2. If multiple locations are discovered, choose `[1]` to scan all accessible locations.
-
-**Expected Terminal Output:**
 ```text
-=================================================================
-  WRS — STORAGE DISCOVERY
-=================================================================
-  Selected Device : Google Pixel 7 (2824****06G7)
------------------------------------------------------------------
-[*] Discovering WhatsApp storage on Google Pixel 7 (2824****06G7)...
+========================================================
+       WRS — RECOVERY OPERATION SELECTION
+========================================================
+Selected Device : Google Pixel 7
+Categories      : All Supported Data
 
---- Discovered WhatsApp Storage Locations on Google Pixel 7 ---
-  [1] /storage/emulated/0/Android/media/com.whatsapp/WhatsApp/ (Read-only Accessible)
-       ↳ Alias normalized: /sdcard/Android/media/com.whatsapp/WhatsApp/
+SELECT OPERATION
 
-=================================================================
-  WRS — SCAN & INVENTORY
-=================================================================
-  Selected Device : Google Pixel 7 (2824****06G7)
------------------------------------------------------------------
-[*] Scanning location: /storage/emulated/0/Android/media/com.whatsapp/WhatsApp/
-    Enumerating files without modification (Scope: Accessible selected locations)...
+[1] Scan Only
+    Discover data and calculate counts and sizes.
 
-[+] Scan completed: 1,516 accessible files (1.44 GiB)
-[*] Inventory-only scan requested. Saving scan catalog...
+[2] Acquire Files
+    Copy selected accessible files to the recovery directory.
 
-=================================================================
-  SCAN COMPLETED
-=================================================================
-  Device             : Google Pixel 7
-  Files discovered   : 1516
-  Total data         : 1.44 GiB
-  Database candidates: 9
-  Media files        : 1462
-  Inaccessible paths : 0
-  Reports            : recovery/Google_Pixel_7_scan_2026-10-28_10-00-00/reports
-=================================================================
+[3] Analyze Chat Databases
+    Inspect supported readable databases and backup candidates.
+
+[4] Export Readable Chats
+    Export supported, actually available chat records.
+
+[5] Export Selected Media
+    Export selected media files and their metadata.
+
+[6] Prepare Native WhatsApp Restore
+    Validate supported backup candidates and guide the user
+    through an applicable native WhatsApp restoration process.
+
+[7] Verify Acquired Data
+    Verify existing acquired files and their integrity.
+
+[0] Back
 ```
+
+- **Scan Only**: Discovers accessible storage, categorizes assets, counts files, and calculates sizes without copying files or modifying device data.
+- **Acquire Files**: Executes evidence acquisition for selected categories after presenting a detailed pre-acquisition preview and requiring affirmative confirmation.
+- **Analyze Chat Databases**: In-depth inspection of SQLite databases and crypt14/15 backup containers.
+- **Export Readable Chats**: Date-range filtered chat export to HTML, JSON, TXT, CSV, and ZIP.
+- **Export Selected Media**: Dedicated media acquisition for selected image, video, audio, voice note, or document categories.
+- **Prepare Native WhatsApp Restore**: Forensic restoration assistant staging validated backup containers and deploying via ADB with strict collision safeguards.
+- **Verify Acquired Data**: Cryptographic integrity verification of acquired folders.
 
 ---
 
-### Option [2]: Scan and Acquire Data (Full Forensic Acquisition)
-**Purpose:** Complete evidence acquisition workflow. Discovers WhatsApp storage, scans files, displays a pre-acquisition preview, enables interactive scope filtering, validates available disk space against safety margins, requires affirmative confirmation, copies files with timestamps preserved, computes SHA-256 hashes, analyzes databases, reconstructs chats, associates media, and generates reports.
+### Option [2]: Select Specific Data Categories
+**Purpose:** Dedicated category selection screen supporting individual categories, multi-category combinations, and fast shortcuts:
 
-**How to Use:**
-1. Type `2` at the main menu and press **Enter**.
-2. Select target storage locations.
-3. Review the **Acquisition Preview**. Select `[1]` to proceed with full scope, or `[2]` / `[3]` to customize categories or exclude duplicate candidate files.
-4. Type `yes` to confirm acquisition.
-
-**Expected Terminal Output:**
 ```text
-========================================================================
-  WRS — ACQUISITION PREVIEW
-========================================================================
-  Scan ID                 : scan_28241FDH_20261028_100000_a1b2c3
-  Device Name & Model     : Google Pixel 7
-  Device Serial / ID      : 2824****06G7
-  Android OS Version      : 14
-  Scan Timestamp          : 2026-10-28 10:00:00
-  Selected Source Scope   : /storage/emulated/0/Android/media/com.whatsapp/WhatsApp/
-  Eligible Files Selected : 1516
-  Available Disk Space    : 148.50 GiB
-  Estimated Required Space: 1.58 GiB
-  Configured Safety Margin: 100.00 MiB (10% dynamic)
-  Target Destination Path : /home/bablu/TOOLS/wrs/recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
-------------------------------------------------------------------------
-  CATEGORY                  FILES        TOTAL SIZE
-  --------------------------------------------------
-  Databases                     2          42.18 MiB
-  Backups                       7         128.45 MiB
-  Images                      450         312.80 MiB
-  Videos                       32         850.12 MiB
-  Audio                        18          14.20 MiB
-  Voice Notes                 812          68.90 MiB
-  Documents                    24          45.10 MiB
-  Stickers                    120          11.35 MiB
-  Animated GIFs                 6           4.12 MiB
-  Other                        45           1.25 MiB
-  --------------------------------------------------
-  TOTAL                      1516           1.44 GiB
+========================================================
+       WRS — SELECT DATA CATEGORIES
+========================================================
+Current Selection : All Supported Data
 
-  Database / Backup Candidates        : 9
-  Duplicate Content Candidates        : 48
-  Storage Assessment                  : Disk space OK: 148.50 GiB available. Required: 1.44 GiB + 147.45 MiB margin.
-========================================================================
+[1] All Supported Data
+[2] Chat History
+[3] Photos and Images
+[4] Videos
+[5] Audio Files
+[6] Voice Notes
+[7] Documents and Files
+[8] Stickers
+[9] GIFs and Animated Media
+[10] Thumbnails
+[11] Databases and Backups
+[12] Other Supported Files
 
-Proceed with acquisition of 1516 files (1.44 GiB) from Google Pixel 7?
-Destination: /home/bablu/TOOLS/wrs/recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
-Enter 'yes' to proceed, or press Enter to cancel [y/N]: yes
+Enter multiple options separated by commas.
+Example: 2,4,7
 
-=================================================================
-  WRS — FILE ACQUISITION IN PROGRESS
-=================================================================
-  Selected Device : Google Pixel 7 (2824****06G7)
------------------------------------------------------------------
-DEVICE       : Google Pixel 7
-PHASE        : FILE ACQUISITION
-TOTAL FILES  : 1516
-TOTAL BYTES  : 1.44 GiB
-DESTINATION  : /home/bablu/TOOLS/wrs/recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
------------------------------------------------------------------
-DEVICE: Google Pixel 7 | PROGRESS: 1516/1516 (100.0%) | BYTES: 1.44 GiB | FILE: msgstore.db.crypt14       | STAT: VERIFIED | FAILS: 0
+[A] Select All
+[C] Clear Selection
+[0] Back
 
-[+] Acquisition phase finished.
-[+] Reconstructed 14 conversation threads (2,840 messages).
-
-=================================================================
-  ACQUISITION SUMMARY
-=================================================================
-  Device              : Google Pixel 7
-  Target Destination  : /home/bablu/TOOLS/wrs/recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
-  Total Acquired      : 1516 files
-  SHA-256 Verified    : 1516 files
-  Chats Reconstructed : 14 conversations
-  HTML Report         : .../reports/report.html
-  CSV Report          : .../reports/report.csv
-  JSON Report         : .../reports/report.json
-=================================================================
+Your selection: 2,4,7
 ```
+
+**Selection Rules & Validation:**
+- Selecting `1`, `A`, or `ALL` selects all 11 supported data categories.
+- Selecting multiple options combines categories without duplication (e.g. `2,4,7,4` normalizes to `Chat History, Videos, Documents and Files`).
+- Selecting `C` clears the selection; `0` returns without changing current settings.
+- Invalid tokens or numbers outside 1–12 produce clear actionable error messages.
 
 ---
 
-### Option [3]: Inspect an Existing Recovery Case
-**Purpose:** Inspects an existing recovery case directory or a standalone WhatsApp SQLite/Crypt database. Verifies manifest status, lists internal database candidates, extracts SQLite tables, parses message threads, and decrypts crypt14/15 files when a key is provided.
+### Option [3]: Recover Chat History & Date-Range Engine
+**Purpose:** Discovers chat history availability, extracts chronological message timestamps from oldest to most recent, validates user-entered `DD-MM-YYYY` date ranges, filters conversations, optionally associates referenced media, and exports transcripts.
 
-**How to Use:**
-1. Type `3` at the main menu and press **Enter**.
-2. Enter the path to a recovery directory (e.g. `./recovery/Google_Pixel_7_scan_2026-10-28_10-00-00`) or a database file (`.../Databases/msgstore.db`).
-3. (Optional) Provide the path to a decryption key file if inspecting encrypted databases.
-
-**Expected Terminal Output:**
+#### Step 1: Chat History Availability Discovery
+If no readable database has been established:
 ```text
-Enter path to recovery directory or database file: recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
-Enter path to decryption key (optional, press Enter to skip): 
+========================================================
+       CHAT HISTORY STATUS
+========================================================
+No readable chat source has been established.
 
-=================================================================
-  INSPECTING RECOVERY DIRECTORY: Google_Pixel_7_scan_2026-10-28_10-00-00
-=================================================================
-  Selected Device    : Google Pixel 7
-  Manifest Found     : .../metadata/acquisition_manifest.json
-  Total Tracked Files: 1516
-  Intact & Verified  : 1516
-  Mismatched / Fail  : 0
-  Missing Files      : 0
-  Integrity Status   : PASSED (Fully Intact)
+Possible reasons:
+- No database or backup was found in accessible locations.
+- The available database is encrypted and cannot currently be processed.
+- The source format is unsupported.
+- The available files contain media but no readable messages.
 
-  Found 2 database candidate(s) in directory:
-   • msgstore.db.crypt14                42.18 MiB  Format: Encrypted (crypt14)
-   • wa.db                               2.10 MiB  Format: SQLite
-=================================================================
+No chat records have been reconstructed.
+
+Next actions:
+[1] Scan additional accessible locations
+[2] Inspect discovered database candidates
+[3] Import an existing supported chat export
+[0] Back
 ```
+
+#### Step 2: Oldest-to-Most-Recent Chat Timeline
+When a supported database is parsed:
+```text
+========================================================
+       AVAILABLE CHAT HISTORY
+========================================================
+Oldest Available Message : 14-03-2022 09:17
+Most Recent Message      : 26-10-2026 21:43
+
+Readable Messages        : 2,840
+Conversations            : 14
+Missing Timestamps       : 3
+
+Choose History Range
+
+[1] All Available History
+[2] Custom Date Range
+[3] Select One Conversation
+[4] Select Multiple Conversations
+[0] Back
+```
+
+#### Step 3: Custom Date-Range Selection (`DD-MM-YYYY`)
+- Validates real calendar dates (rejects impossible dates like `31-02-2024`).
+- Rejects end dates earlier than start dates.
+- Detects ranges entirely outside available history and reports boundaries.
+- Detects partial overlaps and prompts examiner to accept adjusted boundaries.
+- Inclusive day boundaries: `Start 00:00:00.000000` to `End 23:59:59.999999`.
+
+#### Step 4: Distinguish Chat Records from Chat-Related Media
+Prompts:
+```text
+Include media referenced by selected chats? [y/N]: y
+```
+When enabled, only media files linked to selected messages through evidence (`EXACT_DATABASE_REFERENCE` or `MATCHED_RELATIVE_PATH`) are included.
+
+#### Step 5: Acquisition & Export Preview (Section 12)
+```text
+========================================================
+       RECOVERY SELECTION PREVIEW
+========================================================
+Device               : Google Pixel 7
+Operation            : Export Readable Chats
+Categories           : Chat History + Associated Media
+
+Chat Source           : msgstore.db (Reconstructed)
+Oldest Available Date : 14-03-2022 09:17
+Newest Available Date : 26-10-2026 21:43
+
+Requested Range       : 01-01-2024 to 31-12-2024
+Selected Conversations: 8
+Selected Messages     : 1,420
+Selected Files        : 84 media files
+Total Selected Size   : 45.20 MiB
+
+Unreadable Records    : 0
+Missing Timestamps    : 3
+Unmatched Media       : 0
+
+Destination           : recovery/chat_export_2026-10-28_10-30-00
+========================================================
+```
+
+#### Step 6: Explicit Confirmation (Section 13)
+```text
+You are about to export selected chat records.
+
+Conversations : 8
+Messages      : 1,420
+Date Range    : 01-01-2024 to 31-12-2024
+Output Format : TXT, HTML, JSON, and ZIP archive
+Destination   : recovery/chat_export_2026-10-28_10-30-00
+
+Proceed? [y/N]: y
+```
+*Note: Exporting chats to HTML/JSON/ZIP creates forensic archives but does NOT restore chats inside the WhatsApp app.*
 
 ---
 
-### Option [4]: Verify Acquired Files
-**Purpose:** Cryptographic post-acquisition verification tool. Evaluates every local acquired file against the SHA-256 signatures in `acquisition_manifest.json` to prove evidence integrity and detect tampering or disk corruption.
-
-**How to Use:**
-1. Type `4` at the main menu and press **Enter**.
-2. Enter the path to the recovery directory to audit.
-
-**Expected Terminal Output:**
-```text
-=================================================================
-  WRS — INTEGRITY VERIFICATION
-=================================================================
-  Selected Device : Google Pixel 7 (2824****06G7)
------------------------------------------------------------------
-Enter recovery directory path to verify: recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
-
-[*] Verifying cryptographic SHA-256 hashes against manifest: Google_Pixel_7_scan_2026-10-28_10-00-00...
-
-=================================================================
-  INTEGRITY VERIFICATION RESULT
-=================================================================
-  Device              : Google Pixel 7
-  Recovery Path       : /home/bablu/TOOLS/wrs/recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
-  Total Checked Files : 1516
-  Cryptographically OK: 1516
-  Hash Mismatches     : 0
-  Missing Acquired    : 0
-  Status Assessment   : PASSED — FULLY INTACT
-=================================================================
-```
+### Option [4]: Recover Media and Attachments
+**Purpose:** Dedicated media acquisition workflow. Separates media recovery from chat recovery, allowing examiners to acquire photos, videos, voice notes, audio, stickers, and documents without requiring active chat databases.
 
 ---
 
-### Option [5]: Export Reports and ZIP Archive
-**Purpose:** Exports chat conversations to diverse forensic formats (HTML visual bubbles, JSON structured data, CSV tables, plain TXT) or packages a complete case into a verified ZIP archive with pre-allocated disk check and internal SHA-256 manifest.
+### Option [5]: Inspect Backups and Databases (Recovery Assistant)
+**Purpose:** Scans accessible Android WhatsApp storage and existing WRS acquisition folders for database and backup candidates using `RestoreAssistant`.
 
-**How to Use:**
-1. Type `5` at the main menu and press **Enter**.
-2. Choose `[1]` to Export chats or `[2]` to Package recovery directory into verified ZIP.
-
-**Expected Terminal Output (Packaging ZIP):**
 ```text
-============================================================
-  ARCHIVE PACKAGING PREVIEW
-============================================================
-  Source Directory    : /home/bablu/TOOLS/wrs/recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
-  Eligible Files      : 1524
-  Uncompressed Size   : 1.45 GiB
-  Estimated ZIP Size  : 1.38 GiB
-  Available Disk Space: 148.50 GiB
-  Space Sufficient    : Yes
-============================================================
+========================================================================================
+  WRS — INSPECT BACKUPS & DATABASES
+========================================================================================
+Found 3 candidate artifact(s):
 
-Enter destination ZIP name (default: Google_Pixel_7_scan_2026-10-28_10-00-00.zip): 
-Package 1524 files into Google_Pixel_7_scan_2026-10-28_10-00-00.zip? [y/N]: y
-
-[*] Creating and verifying ZIP archive...
-[+] Archive created successfully: .../Google_Pixel_7_scan_2026-10-28_10-00-00.zip
-    Size: 1.38 GiB
+  #    FILENAME                         SIZE        FORMAT     STATUS       LOCATION        
+  ----------------------------------------------------------------------------------------
+  [1]  msgstore-2026-10-26.1.db.crypt14 41.90 MiB   CRYPT14    RESTORABLE   LOCAL_ACQUISITION
+  [2]  msgstore.db                      12.80 MiB   SQLITE     PARSEABLE    LOCAL_ACQUISITION
+  [3]  empty_file.db.crypt14            0 B         EMPTY      UNSUPPORTED  LOCAL_ACQUISITION
 ```
+
+#### Forensic Rules & Provenance:
+1. **Never Classify by Filename Alone**: A file named `msgstore.db.crypt14` that is 0-bytes or has an invalid header is classified as `UNSUPPORTED`.
+2. **Lifecycle States**:
+   - `DISCOVERED`: Discovered on device or directory.
+   - `ACQUIRED`: Safely preserved in local recovery case.
+   - `VALIDATED`: Cryptographic SHA-256 hash verified.
+   - `PARSEABLE`: Unencrypted SQLite database readable by chat parser.
+   - `RESTORABLE`: Valid Crypt14/15 container suitable for native WhatsApp restore.
+   - `UNSUPPORTED`: Zero-byte, corrupted, or unrecognized format.
+3. **Source Categorization**:
+   - `LOCAL_BACKUP`: Encrypted WhatsApp backup container with valid headers.
+   - `SUPPORTED_READABLE_DATABASE`: Unencrypted SQLite database.
+   - `MEDIA_ONLY_COLLECTION`: Collection containing media files but no databases.
+   - `UNSUPPORTED_ARTIFACT`: Unrecognized or corrupted candidate.
 
 ---
 
-### Option [6]: Review Database Candidates
-**Purpose:** Discovers and analyzes all SQLite and encrypted database files in the recovery folder, checking table schemas, record counts, and encryption versions.
+### Option [6]: View Available Chat Dates (Calendar Mode)
+**Purpose:** Chronological calendar listing every date for which actual readable message records exist, with message counts per day:
 
-**How to Use:**
-1. Type `6` at the main menu and press **Enter**.
-2. Press Enter to use the default `./recovery` directory or enter a custom path.
+```text
+========================================================
+       WRS — VIEW AVAILABLE CHAT DATES
+========================================================
 
-**Expected Terminal Output:**
+AVAILABLE MESSAGE DATES
+
+[1]  14-03-2022  | 145 messages
+[2]  15-03-2022  | 89 messages
+[3]  19-03-2022  | 210 messages
+[4]  02-04-2022  | 54 messages
+...
+
+Date Selection Options:
+  [A]     Select All Available Dates
+  [1-N]   Specific Date(s) (comma-separated, e.g. 1,3,5)
+  [0]     Back
+```
+
+Derives dates strictly from message timestamps, never filesystem metadata.
+
+---
+
+### Option [7]: Export Recovered Data
+**Purpose:** Reconstructs and exports chat records to HTML, JSON, CSV, and TXT, or packages existing recovery cases into verified ZIP archives with internal checksums.
+
+---
+
+### Option [8]: Verify Existing Recovery Files
+**Purpose:** Post-acquisition cryptographic audit. Verifies all files in a recovery directory against `acquisition_manifest.json` SHA-256 digests.
+
+---
+
+### Option [9]: View Previous Scans
+**Purpose:** Catalogs and reviews historical scan cases in `./recovery/`, displaying scan date, folder size, file count, and database candidates.
+
+---
+
+### Option [10]: Settings and Help
+**Purpose:** Persistent configuration editor (`config/settings.json`), plus comprehensive guides for:
+- Supported storage locations and forensic boundaries.
+- Native WhatsApp restoration prerequisites and rollback safeguards.
+
+---
+
+### Option [0]: Exit
+Cleanly terminates the application session.
+
+---
+
+## 7. Native WhatsApp Restore Assistant & Rollback Safeguards
+
+For supported local backups (`LOCAL_BACKUP`), WRS includes a guided, non-destructive restoration workflow:
+
+### Restoration Prerequisites:
+1. **Same Phone Number**: The phone must register with the same phone number associated with the backup.
+2. **Fresh WhatsApp Setup**: WhatsApp must be freshly installed or cleared, and **NOT yet registered or verified**.
+3. **Pre-registration Placement**: The backup file (`msgstore.db.crypt14` or `msgstore.db.crypt15`) must be placed in `/sdcard/Android/media/com.whatsapp/WhatsApp/Databases/` **BEFORE** opening WhatsApp.
+4. **Storage Permissions**: Android must grant Storage / "All Files Access" permissions to WhatsApp before launching setup.
+5. **Skip Google Drive**: When WhatsApp setup prompts for Google Drive backups, choose **Skip** so it falls back to the local database.
+6. **Offline Precaution**: Enable Airplane mode during setup if Google Drive attempts to overwrite with empty cloud data.
+
+### Mandatory Safety & Rollback Rules:
+- **No Automatic App Modification**: WRS **never** uninstalls WhatsApp, clears application data, or registers phone numbers automatically.
+- **Affirmative Confirmation**: WRS **never** writes files to an Android device without explicit affirmative user confirmation (`[y/N]`, defaulting to No).
+- **Device Collision Refusal**: If `msgstore.db.crypt14` already exists on the Android device, WRS **refuses** to push and halts with an actionable collision error to prevent accidental evidence destruction.
+- **Evidence Preservation**: The original candidate file is never moved or modified; staging creates a verified copy in `recovery/staged_restore_<timestamp>/` with an accompanying `restoration_manifest.json`.
+
+### Post-Restoration Verification Checklist:
 ```text
 =================================================================
-  WRS — REVIEW DATABASE CANDIDATES
+  POST-RESTORATION VERIFICATION CHECKLIST
 =================================================================
-  Selected Device : Google Pixel 7 (2824****06G7)
------------------------------------------------------------------
-Enter recovery folder path to inspect (default: ./recovery): 
-
-[*] Scanning for WhatsApp database candidates in /home/bablu/TOOLS/wrs/recovery...
-
-  DATABASE CANDIDATE FILE          SIZE       FORMAT            STATUS / DETAILS
-  --------------------------------------------------------------------------------
-  msgstore.db.crypt14          42.18 MiB  Crypt14 (AES-GCM) Encrypted (Key Required)
-  msgstore-2026-10-26.1.db.crypt14 41.90 MiB  Crypt14 (AES-GCM) Dated Backup
-  wa.db                         2.10 MiB  SQLite 3          5 tables (Contacts/JIDs)
-  --------------------------------------------------------------------------------
-  Total Candidates Discovered: 3 (1 SQLite compatible, 2 Encrypted)
+  [ ] 1. Open WhatsApp and confirm chat threads and contacts appear.
+  [ ] 2. Check the date of the most recent message to verify the backup date matches.
+  [ ] 3. Open a key conversation and scroll up to verify message history and media placeholders.
+  [ ] 4. Verify group memberships and participant identifiers have loaded correctly.
+  [ ] 5. If media files were also acquired, verify photos and voice notes resolve in WhatsApp.
 =================================================================
-```
-
----
-
-### Option [7]: Settings and Configuration
-**Purpose:** Customizes runtime settings (`config/settings.json`), including serial masking, live transfer progress display, default recovery path, and safety margin thresholds.
-
-**How to Use:**
-1. Type `7` at the main menu and press **Enter**.
-2. Choose an option (1-6) to update settings, or `[7]` to return to the main menu.
-
-**Expected Terminal Output:**
-```text
-============================================================
-  WRS — SETTINGS & CONFIGURATION
-============================================================
-  [1] Mask Device Serial in UI    : Disabled
-  [2] Live Progress Display       : Enabled
-  [3] Default Recovery Directory  : recovery
-  [4] Safety Margin Free Space    : 100.00 MiB
-  [5] Safety Margin Ratio         : 10%
-  [6] Reset to Factory Defaults
-  [7] Return to Main Menu
-============================================================
-Enter choice [1-7]: 1
-[+] Serial masking in UI enabled.
-```
-
----
-
-### Option [8]: Refresh Connected Devices
-**Purpose:** Forces an immediate re-enumeration of Android devices connected via ADB. Clears cached device metadata, checks ADB server responsiveness, and updates the terminal header with real-time connection status.
-
-**How to Use:**
-1. Type `8` at the main menu and press **Enter**.
-
-**Expected Terminal Output:**
-```text
-[*] Refreshing connected Android devices...
-╭────────────────── WRS — WhatsApp Recovery Scanner ──────────────────╮
-│ Processing Mode : 100% Local Execution                              │
-│ ADB Status      : AVAILABLE (version 1.0.41)                         │
-│ Android Device  : Google Pixel 7 (CONNECTED AND AUTHORIZED)          │
-│ Version         : v2.0.0                                            │
-│ Timestamp       : 2026-10-28 10:20:00                               │
-╰──────────── Forensic Acquisition & Preservation Utility ────────────╯
-
-CONNECTED ANDROID DEVICES
---------------------------------------------------------------
-[1] Device Name : Google Pixel 7
-    Model       : Pixel 7
-    Manufacturer: Google
-    Android     : 14
-    Device ID   : 2824****06G7
-    Status      : CONNECTED / AUTHORIZED
---------------------------------------------------------------
-Selected Device  : Google Pixel 7
-==============================================================
-```
-
----
-
-### Option [9]: Exit
-**Purpose:** Cleanly terminates the application session without leaving orphaned processes.
-
-**How to Use:**
-1. Type `9` at the main menu and press **Enter**.
-
-**Expected Terminal Output:**
-```text
-Exiting WRS. Goodbye.
 ```
 
 ---
@@ -740,9 +740,9 @@ recovery/
 
 ---
 
-## 11. Automated Test Suite
+## 10. Automated Test Suite
 
-WRS includes a comprehensive suite of **88 automated unit tests** (100% passing):
+WRS includes a comprehensive suite of **113 automated unit tests** (100% passing):
 
 ```bash
 # Run full test suite with pytest
@@ -753,6 +753,8 @@ python3 -m unittest discover tests
 ```
 
 ### Test Coverage Summary:
+- `test_recovery_wizard.py` *(Phase 4)*: Category parsing (all, comma-separated e.g. `2,4,7`, `A`, `C`, `0`), storage category translation, real calendar date validation (rejecting `31-02-2024`, end < start, outside range, partial overlaps, inclusive boundaries), timeline extraction, available-date calendar counts, specific-date filtering, multiple conversation filtering, timezone-aware timestamp conversion, and multi-format chat exports.
+- `test_restore_assistant.py` *(Phase 4)*: Restoration candidate scanning (local and remote), forensic provenance tracking, source assessment (`LOCAL_BACKUP`, `SUPPORTED_READABLE_DATABASE`, `MEDIA_ONLY_COLLECTION`, `UNSUPPORTED_ARTIFACT`), prohibition against classifying encrypted DB as restorable solely from filename, staging preparation with manifest, staging collision detection, device destination collision refusal, affirmative confirmation requirement, and verification checklist.
 - `test_device_status_authenticity.py`: Authentic status separation (`AVAILABLE` vs `NONE DETECTED`), daemon noise filtering, offline/unauthorized device property query suppression, multiple device selection enforcement, hotplug disconnection handling, and runtime state provenance (`RuntimeStateManager`).
 - `test_device_ux.py`: Device detection, single/multiple device selection, unauthorized/offline/disconnected states, fallback naming, Unicode handling, serial masking, transfer disconnection safety.
 - `test_cli_ux.py`: Persistent screen headers, confirmation prompts, recovery folder naming, plain-text progress fallback, dry-run mode, and persistent configuration.
