@@ -232,8 +232,8 @@ class PriorityDiscoveryEngine:
     ]
 
     DEVICE_W4B_PATHS = [
-        "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp/",
         "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/",
+        "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp/",
     ]
 
     def __init__(
@@ -582,9 +582,9 @@ class PriorityDiscoveryEngine:
                     cat_name = self._map_subdir_to_category(s_dir)
                     sub_path = f"{m_clean}{s_dir}/"
                     cnt_cmd = self.executor.run_cmd(
-                        ["shell", f'ls -1 "{sub_path}" 2>/dev/null | wc -l'],
+                        ["shell", f'ls -f "{sub_path}" 2>/dev/null | wc -l'],
                         serial=target_dev.serial,
-                        timeout=5,
+                        timeout=12,
                     )
                     count_val = 0
                     if cnt_cmd.returncode == 0 and cnt_cmd.stdout.strip().isdigit():
@@ -654,6 +654,7 @@ class PriorityDiscoveryEngine:
         p4_err = None
         p4_path = self.DEVICE_W4B_PATHS[0]
         canonical_p4 = p4_path
+        w4b_subdirs: List[str] = []
 
         if target_dev and target_dev.is_accessible:
             found_w4b = False
@@ -667,14 +668,133 @@ class PriorityDiscoveryEngine:
                 if "EXISTS" in chk.stdout:
                     found_w4b = True
                     p4_path = b_clean
-                    # Count accessible files inside WhatsApp Business
-                    cnt_cmd = self.executor.run_cmd(
-                        ["shell", f'ls -1R "{b_clean}" 2>/dev/null | grep -v "^$" | grep -v ":" | wc -l'],
+
+                    # 1. Targeted check for WhatsApp Business Databases & Backups
+                    for db_sub in ["Databases/", "Backups/"]:
+                        w4b_db_path = f"{b_clean}{db_sub}"
+                        chk_db = self.executor.run_cmd(
+                            ["shell", "test", "-d", f'"{w4b_db_path}"', "&&", "echo", "EXISTS"],
+                            serial=target_dev.serial,
+                            timeout=5,
+                        )
+                        if "EXISTS" in chk_db.stdout:
+                            w4b_subdirs.append(db_sub.rstrip("/"))
+                            ls_cmd = self.executor.run_cmd(
+                                ["shell", f'ls -l "{w4b_db_path}" 2>/dev/null'],
+                                serial=target_dev.serial,
+                                timeout=8,
+                            )
+                            if ls_cmd.returncode == 0:
+                                for line in ls_cmd.stdout.splitlines():
+                                    line_clean = line.strip()
+                                    if not line_clean or line_clean.startswith("total"):
+                                        continue
+                                    parts = line_clean.split()
+                                    if len(parts) >= 8:
+                                        fname = parts[-1]
+                                        if (
+                                            fname.startswith("msgstore")
+                                            or fname.startswith("chatsearch")
+                                            or fname.startswith("wa.db")
+                                            or fname.endswith(".db")
+                                            or ".crypt" in fname
+                                        ):
+                                            try:
+                                                sz = int(parts[4])
+                                            except (ValueError, IndexError):
+                                                sz = 0
+                                            full_dp = f"{w4b_db_path}{fname}"
+                                            fmt = "UNKNOWN"
+                                            is_enc = False
+                                            is_sql = False
+                                            if "crypt15" in fname:
+                                                fmt = "CRYPT15"
+                                                is_enc = True
+                                            elif "crypt14" in fname:
+                                                fmt = "CRYPT14"
+                                                is_enc = True
+                                            elif "crypt12" in fname:
+                                                fmt = "CRYPT12"
+                                                is_enc = True
+                                            elif fname.endswith(".db") and not is_enc:
+                                                fmt = "SQLITE"
+                                                is_sql = True
+
+                                            candidates.append(
+                                                DiscoveryCandidate(
+                                                    path=full_dp,
+                                                    filename=fname,
+                                                    category="DATABASES",
+                                                    size_bytes=sz,
+                                                    is_device=True,
+                                                    is_database=True,
+                                                    db_format=fmt,
+                                                    is_readable=is_sql,
+                                                    is_encrypted=is_enc,
+                                                    source_priority=4,
+                                                    details="WhatsApp Business database candidate",
+                                                )
+                                            )
+                                            p4_files += 1
+                                            p4_bytes += sz
+                                            try:
+                                                self.registry.register(
+                                                    ChatDatabaseCandidate(
+                                                        path=full_dp,
+                                                        filename=fname,
+                                                        size_bytes=sz,
+                                                        source="DEVICE_STORAGE",
+                                                        format_type=fmt,
+                                                        is_sqlite=is_sql,
+                                                        is_encrypted=is_enc,
+                                                        is_readable=is_sql,
+                                                        validation_notes="WhatsApp Business candidate",
+                                                    )
+                                                )
+                                            except Exception:
+                                                pass
+
+                    # 2. Targeted check for WhatsApp Business Media subdirectories
+                    w4b_media_path = f"{b_clean}Media/"
+                    chk_m = self.executor.run_cmd(
+                        ["shell", "test", "-d", f'"{w4b_media_path}"', "&&", "echo", "EXISTS"],
                         serial=target_dev.serial,
-                        timeout=6,
+                        timeout=5,
                     )
-                    if cnt_cmd.returncode == 0 and cnt_cmd.stdout.strip().isdigit():
-                        p4_files = int(cnt_cmd.stdout.strip())
+                    if "EXISTS" in chk_m.stdout:
+                        w4b_subdirs.append("Media")
+                        sub_chk = self.executor.run_cmd(
+                            ["shell", f'ls -F "{w4b_media_path}" 2>/dev/null | grep "/"'],
+                            serial=target_dev.serial,
+                            timeout=6,
+                        )
+                        if sub_chk.returncode == 0:
+                            subdirs = [s.strip().rstrip("/") for s in sub_chk.stdout.splitlines() if s.strip()]
+                            for s_dir in subdirs:
+                                cat_name = self._map_subdir_to_category(s_dir)
+                                sub_path = f"{w4b_media_path}{s_dir}/"
+                                cnt_cmd = self.executor.run_cmd(
+                                    ["shell", f'ls -f "{sub_path}" 2>/dev/null | wc -l'],
+                                    serial=target_dev.serial,
+                                    timeout=12,
+                                )
+                                count_val = 0
+                                if cnt_cmd.returncode == 0 and cnt_cmd.stdout.strip().isdigit():
+                                    count_val = int(cnt_cmd.stdout.strip())
+                                p4_files += count_val
+                                if count_val > 0:
+                                    candidates.append(
+                                        DiscoveryCandidate(
+                                            path=sub_path,
+                                            filename=s_dir,
+                                            category=cat_name,
+                                            size_bytes=0,
+                                            is_device=True,
+                                            is_database=False,
+                                            source_priority=4,
+                                            details=f"WhatsApp Business: {count_val} matching files in {s_dir}",
+                                        )
+                                    )
                     break
 
             if found_w4b:
@@ -702,6 +822,7 @@ class PriorityDiscoveryEngine:
                 is_accessible=(p4_status == STATUS_FOUND or p4_status == STATUS_EMPTY),
                 is_device=True,
                 is_business=True,
+                subdirectories=w4b_subdirs,
                 error_message=p4_err,
                 notes="WhatsApp Business (com.whatsapp.w4b) directory",
             )
