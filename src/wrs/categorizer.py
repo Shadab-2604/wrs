@@ -62,9 +62,9 @@ CATEGORY_DIR_NAMES = {
     CAT_OTHER: "Other",
 }
 
-# Regex for dated WhatsApp database backups (e.g. msgstore-2026-10-25.1.db.crypt14)
+# Regex for dated WhatsApp database backups (e.g. msgstore-2026-10-25.1.db.crypt14, msgstore-increment-1-2026-10-27.1.db.crypt14)
 RE_DATED_BACKUP = re.compile(
-    r"^msgstore-\d{4}-\d{2}-\d{2}(\.\d+)?\.db\.crypt\d+$",
+    r"^msgstore(-increment(-\d+)?)?-\d{4}-\d{2}-\d{2}(\.\d+)?\.db\.crypt\d+$",
     re.IGNORECASE,
 )
 

@@ -98,6 +98,12 @@ from .db_discovery import (
     DatabaseDiscoveryService,
     inspect_sqlite_chat_dates,
 )
+from .key_assessment import (
+    EncryptedDatabaseManager,
+    KeyAssessmentService,
+    encrypted_database_candidates_menu,
+    display_encrypted_candidates_list,
+)
 from .priority_discovery import (
     DiscoveryCandidate,
     DiscoveryLocation,
@@ -2017,7 +2023,7 @@ def select_or_discover_chat_database_interactive(
 
             print("\nAvailable Actions:")
             print("[1] Inspect database metadata")
-            print("[2] Check for supported decryption material")
+            print("[2] Encrypted database wizard (key assessment, download, decrypt)")
             print("[3] Scan additional accessible locations")
             print("[4] Select an existing local database or backup")
             print("[5] Back\n")
@@ -2026,7 +2032,12 @@ def select_or_discover_chat_database_interactive(
             if c_act == "1":
                 _inspect_candidates_metadata(result.encrypted_candidates)
             elif c_act == "2":
-                dec_cand = _handle_decryption_action(result.encrypted_candidates, service)
+                dec_cand = encrypted_database_candidates_menu(
+                    exec_inst,
+                    device,
+                    st_inst,
+                    discovery_manifest=None,
+                )
                 if dec_cand:
                     return dec_cand
             elif c_act == "3":
@@ -2110,12 +2121,23 @@ def recover_chat_history_interactive(
             print("\n    WhatsApp encrypts chat backups with AES-GCM (Crypt14/Crypt15).")
             print("    A WhatsApp decryption key is required to reconstruct messages.")
             print("\nOptions:")
-            print("  [1] Provide WhatsApp decryption key file")
+            print("  [1] Open Encrypted Database & Decryption Wizard")
             print("  [2] Rescan discovery locations for databases")
             print("  [0] Back to Main Menu\n")
             act = input("Select an option [0-2]: ").strip()
             if act in ("0", "back", ""):
                 return
+            elif act == "1":
+                dec_cand = encrypted_database_candidates_menu(
+                    executor or AdbExecutor(),
+                    device,
+                    settings,
+                    discovery_manifest=discovery_manifest,
+                )
+                if dec_cand:
+                    chosen_cand = dec_cand
+            elif act == "2":
+                pass
 
     # 1. Automatically discover and select suitable database
     chosen_cand = select_or_discover_chat_database_interactive(
@@ -2684,11 +2706,15 @@ def inspect_backups_and_databases_interactive(
     if not all_candidates:
         print("[*] No database or backup candidates found in local recovery or device external storage.")
         print("\nOptions:")
+        print("  [E] Encrypted database candidate wizard (key assessment, download, decrypt)")
         print("  [R] Targeted rescan of database locations")
         print("  [P] Enter custom database path to inspect")
         print("  [0] Back to Main Menu\n")
-        act = input("Enter choice [R/P/0]: ").strip().lower()
-        if act == "r":
+        act = input("Enter choice [E/R/P/0]: ").strip().lower()
+        if act == "e":
+            encrypted_database_candidates_menu(executor, device, settings, discovery_manifest=discovery_manifest)
+            return
+        elif act == "r":
             print("\n[*] Performing targeted rescan of database locations...")
             run_animated_priority_discovery(executor, device, settings)
             return
@@ -2716,11 +2742,15 @@ def inspect_backups_and_databases_interactive(
 
     print("\nOptions:")
     print("  [1-N] Inspect candidate details")
+    print("  [E]   Encrypted database wizard (key assessment, download, decrypt)")
     print("  [R]   Targeted rescan of database locations")
     print("  [0]   Back to Main Menu\n")
 
     pick = input("Enter choice: ").strip()
     if pick == "0" or not pick:
+        return
+    if pick.lower() == "e":
+        encrypted_database_candidates_menu(executor, device, settings, discovery_manifest=discovery_manifest)
         return
     if pick.lower() == "r":
         print("\n[*] Performing targeted rescan of database locations...")

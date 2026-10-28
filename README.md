@@ -854,6 +854,76 @@ Found 3 candidate artifact(s):
 
 ---
 
+### Encrypted Database Candidates, Key-Availability Assessment & Decryption Wizard
+**Purpose:** Discovers encrypted WhatsApp database containers (`msgstore.db.crypt14`, dated backups `msgstore-YYYY-MM-DD.1.db.crypt14`, and incremental backups `msgstore-increment-N-YYYY-MM-DD.1.db.crypt14`), checks encryption key availability across authorized local sources, enables safe non-destructive file acquisition, and performs AES-GCM decryption on working copies when prerequisites are met.
+
+Accessible directly from:
+- **Option [5] -> [E]**: Encrypted database wizard from Candidate Inspection.
+- **Option [3]**: Automatic transition when only encrypted databases are discovered.
+- **Option [6]**: Date Explorer decision flow (Case C).
+
+#### 1. Candidate Screen & Key Status Interface:
+```text
+========================================================
+       WRS — ENCRYPTED DATABASE CANDIDATES
+========================================================
+
+[1] msgstore.db.crypt14
+    Format      : CRYPT14
+    Encryption  : Encrypted candidate
+    Key status  : Not found in accessible sources
+    Validation  : Not yet decrypted
+
+[2] msgstore-2026-10-28.1.db.crypt14
+    Format      : CRYPT14
+    Encryption  : Encrypted candidate
+    Key status  : Required key material available
+    Validation  : Decryption readiness not yet verified
+
+--------------------------------------------------------
+[1] Inspect selected candidate
+[2] Check key availability
+[3] Download/copy encrypted files
+[4] Decrypt selected candidate (only if ready)
+[5] Select multiple candidates
+[6] Back
+```
+
+#### 2. Key-Availability Status Hierarchy:
+WRS maintains honest, verifiable lifecycle states for every discovered candidate:
+- `ENCRYPTED — KEY NOT CHECKED`: Candidate discovered; authorized key sources have not yet been queried.
+- `ENCRYPTED — KEY NOT FOUND IN ACCESSIBLE SOURCES`: Authorized local sources scanned; matching key not accessible. On unrooted Android devices, the application sandbox boundary (`/data/data/com.whatsapp/files/key`) is clearly documented without falsely asserting the key does not exist.
+- `ENCRYPTED — REQUIRED KEY MATERIAL AVAILABLE`: Legitimate, verified key material found in local case directory, adjacent path, or user-supplied file.
+- `DECRYPTION READY — FORMAT SUPPORTED`: Container format (`CRYPT14` / `CRYPT15`) is supported and matching verified key is ready.
+- `DECRYPTION UNSUPPORTED`: Identified format (e.g., legacy `CRYPT8`, `CRYPT10`, `CRYPT12`) is not supported for automated decryption.
+- `DECRYPTION FAILED — SEE DETAILS`: Decryption attempted but failed due to invalid key, damaged ciphertext, or failed SQLite database verification.
+- `DECRYPTED — DATABASE VALIDATION PASSED`: Working copy successfully decrypted with AES-GCM-256, decompressed with zlib, and validated via read-only SQLite integrity check (`PRAGMA integrity_check(5)`).
+
+#### 3. Authorized Key Discovery Sources:
+WRS inspects only documented, authorized locations:
+1. **Adjacent Key Material**: A `key` file residing in the same directory as the encrypted database candidate.
+2. **Local Recovery & Case Directories**: Previous legitimate acquisitions in `./recovery/`.
+3. **User-Supplied Key Material**: Validated 158-byte WhatsApp key file, 32-byte raw AES key, or 64-character hex string provided by the user.
+4. **Android Device Storage (ADB)**: Safe, read-only check of `/data/data/com.whatsapp/files/key` when root shell access is authorized. On standard non-rooted devices, WRS honors Android application sandbox boundaries without attempting unauthorized privilege escalation or brute force.
+
+> [!NOTE]
+> **Secret Redaction Policy**: WRS never prints, logs, or exports secret key bytes, raw tokens, or passwords to terminal output, case event logs, or JSON manifests. All references use non-reversible masked identifiers (e.g. `key_158b_...`).
+
+#### 4. Safe Acquisition of Encrypted Databases (Option [3] & [5]):
+Users can acquire and preserve encrypted databases for safekeeping even when decryption keys are unavailable:
+- **Selection Modes**: Single candidate, multiple candidates (comma-separated or ranges), or all candidates.
+- **Recovery Destination Policy**: Defaults on Enter to `<project_root>/recovery/<device_name>/<session>/databases/` (or `recovery/local_import/...` for local imports).
+- **Overwrite Protection**: Destination filename collisions are automatically resolved with unique incremental suffixes (e.g., `msgstore_1.db.crypt14`). Original files are never overwritten.
+- **Integrity Manifests**: Computes streaming SHA-256 hashes during transfer and generates `acquisition_manifest.json` and SQLite scan inventories.
+
+#### 5. Working Copy Decryption & Database Validation (Option [4]):
+- **Working Copy Safeguard**: Decryption is performed strictly on an isolated working copy in `<recovery_dir>/<device>/decrypted/`. Original encrypted source files are never altered or overwritten.
+- **Decompression**: WhatsApp Crypt14/15 payloads are compressed with zlib inside the AES-GCM ciphertext; WRS decompresses the stream automatically.
+- **Database Validation**: Decrypted output must pass SQLite header verification (`SQLite format 3\x00`) and read-only schema integrity check (`PRAGMA integrity_check(5)`).
+- **Post-Decryption Analysis**: Validated databases are registered in `ChatDatabaseRegistry`, immediately unlocking chat timeline discovery, date-range filtering, and HTML/JSON/CSV/TXT export.
+
+---
+
 ### Option [6]: View Available Chat Dates (Automatic Discovery & Date Range Explorer)
 **Purpose:** Automatically detects, evaluates, and selects readable WhatsApp databases across local directories, persistent registries, and connected Android devices, then parses authentic message timestamps into chronological timelines and calendars.
 

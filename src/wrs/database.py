@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import sqlite3
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -37,6 +38,7 @@ class DatabaseMetadata:
     is_sqlite: bool = False
     is_encrypted: bool = False
     is_dated_backup: bool = False
+    is_incremental: bool = False
     size_bytes: int = 0
     sha256: str = ""
     integrity_ok: bool = False
@@ -66,7 +68,8 @@ class WhatsAppDatabaseAnalyzer:
         sz = p.stat().st_size
         sha256_hash, _, _ = hash_local_file(p)
         fn_lower = p.name.lower()
-        is_dated = bool(re.search(r"msgstore-\d{4}-\d{2}-\d{2}", fn_lower))
+        is_dated = bool(re.search(r"msgstore(-increment(-\d+)?)?-\d{4}-\d{2}-\d{2}", fn_lower))
+        is_inc = "increment" in fn_lower
 
         # Read first 128 bytes for magic signature checks
         header = b""
@@ -94,6 +97,7 @@ class WhatsAppDatabaseAnalyzer:
                 is_sqlite=True,
                 is_encrypted=False,
                 is_dated_backup=is_dated,
+                is_incremental=is_inc,
                 size_bytes=sz,
                 sha256=sha256_hash or "",
             )
@@ -126,6 +130,7 @@ class WhatsAppDatabaseAnalyzer:
                 is_sqlite=False,
                 is_encrypted=True,
                 is_dated_backup=is_dated,
+                is_incremental=is_inc,
                 size_bytes=sz,
                 sha256=sha256_hash or "",
                 notes=(
@@ -385,7 +390,9 @@ class WhatsAppDatabaseAnalyzer:
     ) -> Tuple[bool, str]:
         """Decrypt a WhatsApp crypt14 / crypt15 database using a valid user-provided key.
 
-        WhatsApp key files are 158 bytes; the 32-byte AES key is at offset 126..158.
+        Supports standard 158-byte WhatsApp key files (32-byte AES key at offset 126..158),
+        32-byte raw binary keys, or 64-character hex key strings.
+        Performs authenticated AES-GCM decryption, automatic zlib decompression, and SQLite integrity validation.
         """
         if not HAS_CRYPTOGRAPHY:
             return False, "Python 'cryptography' library is not available in environment."
@@ -398,14 +405,28 @@ class WhatsAppDatabaseAnalyzer:
             return False, f"Encrypted database not found: {c_path}"
         if not k_path.is_file():
             return False, f"Key file not found: {k_path}"
+        if c_path == out_p:
+            return False, "Destination path cannot overwrite the encrypted source database."
 
         try:
             key_data = k_path.read_bytes()
-            if len(key_data) < 158:
-                return False, f"Invalid WhatsApp key size ({len(key_data)} bytes). Standard key is 158 bytes."
+            aes_key: Optional[bytes] = None
+            if len(key_data) == 158:
+                aes_key = key_data[126:158]
+            elif len(key_data) == 32:
+                aes_key = key_data
+            elif len(key_data) in (64, 65):
+                try:
+                    hex_s = key_data.decode("ascii").strip()
+                    if len(hex_s) == 64:
+                        aes_key = bytes.fromhex(hex_s)
+                except Exception:
+                    pass
+            elif len(key_data) > 158:
+                aes_key = key_data[126:158]
 
-            # Extract 32-byte AES key
-            aes_key = key_data[126:158]
+            if not aes_key or len(aes_key) != 32:
+                return False, f"Invalid WhatsApp key format ({len(key_data)} bytes). Expected 158-byte WhatsApp key file or 32-byte AES key."
 
             with open(c_path, "rb") as f:
                 crypt_data = f.read()
@@ -414,8 +435,6 @@ class WhatsAppDatabaseAnalyzer:
 
             # Crypt14 / Crypt15 header handling
             if fn_lower.endswith((".crypt14", ".crypt15")):
-                # In crypt14/15, IV is 16 bytes. Header is typically 191 bytes (or variable protobuf).
-                # IV is located at offset 67:83 in standard crypt14 protobuf header.
                 if len(crypt_data) < 191 + 16:
                     return False, "File too small to be a valid crypt14/15 database."
 
@@ -423,14 +442,41 @@ class WhatsAppDatabaseAnalyzer:
                 ciphertext = crypt_data[191:]
 
                 aesgcm = AESGCM(aes_key)
-                # In AES-GCM, the last 16 bytes of ciphertext are typically the authentication tag
-                decrypted = aesgcm.decrypt(iv[:12], ciphertext, None)
+                try:
+                    decrypted = aesgcm.decrypt(iv[:12], ciphertext, None)
+                except Exception as e:
+                    return False, f"Decryption authentication failed: {e}. Key does not match this database or ciphertext is corrupted."
+
+                # If compressed with zlib, decompress
+                if not decrypted.startswith(b"SQLite format 3\x00"):
+                    try:
+                        decomp = zlib.decompress(decrypted)
+                        if decomp.startswith(b"SQLite format 3\x00"):
+                            decrypted = decomp
+                    except Exception:
+                        pass
+
+                if not decrypted.startswith(b"SQLite format 3\x00"):
+                    return False, "Decryption succeeded under AES-GCM, but payload does not contain a valid SQLite database header."
 
                 out_p.parent.mkdir(parents=True, exist_ok=True)
                 out_p.write_bytes(decrypted)
-                return True, f"Successfully decrypted to {out_p} ({len(decrypted)} bytes)."
 
-            return False, f"Unsupported encryption format for {c_path.name}."
+                # Validate SQLite integrity
+                try:
+                    uri = f"file:{out_p}?mode=ro"
+                    with sqlite3.connect(uri, uri=True, timeout=5.0) as conn:
+                        cur = conn.cursor()
+                        cur.execute("PRAGMA integrity_check(5);")
+                        rows = cur.fetchall()
+                        if not any(str(r[0]).strip().lower() == "ok" for r in rows if r):
+                            return False, f"Decrypted file failed SQLite integrity check: {rows}"
+                except sqlite3.Error as se:
+                    return False, f"Decrypted file could not be parsed as SQLite: {se}"
+
+                return True, f"Successfully decrypted and validated to {out_p} ({len(decrypted)} bytes)."
+
+            return False, f"Unsupported encryption format for {c_path.name}. Decryption is supported for crypt14 and crypt15."
 
         except Exception as e:
             return False, f"Decryption failed: {e}. Ensure key matches this specific database."

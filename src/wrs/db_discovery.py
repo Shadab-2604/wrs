@@ -54,6 +54,10 @@ class ChatDatabaseCandidate:
     sha256: str = ""
     validation_notes: str = ""
     is_stale: bool = False
+    key_status: str = "ENCRYPTED — KEY NOT CHECKED"
+    key_path: Optional[str] = None
+    decryption_status: str = "Not yet decrypted"
+    is_incremental: bool = False
     last_discovered: str = field(default_factory=format_timestamp)
 
     @property
@@ -90,6 +94,14 @@ class ChatDatabaseCandidate:
                 d["newest_dt"] = None
         if "mtime_epoch" not in d:
             d["mtime_epoch"] = 0.0
+        if "key_status" not in d:
+            d["key_status"] = "ENCRYPTED — KEY NOT CHECKED"
+        if "key_path" not in d:
+            d["key_path"] = None
+        if "decryption_status" not in d:
+            d["decryption_status"] = "Not yet decrypted"
+        if "is_incremental" not in d:
+            d["is_incremental"] = False
 
         return cls(**d)
 
@@ -471,6 +483,9 @@ class DatabaseDiscoveryService:
                             is_encrypted=is_enc,
                             is_readable=False,  # Remote device databases must be acquired before direct SQLite queries
                             is_accessible=True,
+                            is_incremental="increment" in fn_lower,
+                            key_status="ENCRYPTED — KEY NOT CHECKED" if is_enc else "NOT ENCRYPTED",
+                            decryption_status="Not yet decrypted" if is_enc else "Plain SQLite",
                             modified_timestamp=format_timestamp(),
                             validation_notes=f"Discovered on Android device external storage ({dev_dir}).",
                         )
@@ -528,12 +543,18 @@ class DatabaseDiscoveryService:
             cand.is_encrypted = True
             cand.is_sqlite = False
             cand.is_readable = False
+            cand.is_incremental = "increment" in fn_lower
 
-            key_candidate = p.parent / "key"
-            cand.has_key = key_candidate.exists()
+            from .key_assessment import KeyAssessmentService
+            key_svc = KeyAssessmentService(self.executor, self.settings)
+            res = key_svc.assess_candidate(cand)
+            cand.key_status = res.key_status
+            cand.has_key = res.key_found
+            cand.key_path = res.key_source
+            cand.decryption_status = res.validation_status
             cand.validation_notes = (
                 f"WhatsApp {crypt_ver} encrypted database. "
-                f"Key status: {'Found in directory' if cand.has_key else 'Key file required'}."
+                f"Key status: {res.key_status}. {res.notes}"
             )
             return
 
