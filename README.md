@@ -520,29 +520,90 @@ Found 3 candidate artifact(s):
 
 ---
 
-### Option [6]: View Available Chat Dates (Calendar Mode)
-**Purpose:** Chronological calendar listing every date for which actual readable message records exist, with message counts per day:
+### Option [6]: View Available Chat Dates (Automatic Discovery & Date Range Explorer)
+**Purpose:** Automatically detects, evaluates, and selects readable WhatsApp databases across local directories, persistent registries, and connected Android devices, then parses authentic message timestamps into chronological timelines and calendars.
+
+#### 1. Automatic Database Discovery Priority Order:
+When Option [6] (or Option [3]) is selected, WRS automatically searches the following locations without demanding manual path entry:
+1. **Persistent Candidate Registry**: `recovery/database_registry.json` containing previously cataloged databases (with automatic detection and flagging of stale, moved, or deleted files).
+2. **Acquisition & Recovery Output**: Local `./recovery/` directory and historical extraction folders.
+3. **Configured Local Search Paths**: User-selected directories configured in `config/settings.json`.
+4. **Connected Android Device External Storage (via ADB)**: Read-only inspection over ADB when a device is connected and authorized.
+5. **Common Standard WhatsApp Backup Locations**:
+   - `/sdcard/Android/media/com.whatsapp/WhatsApp/Databases/`
+   - `/sdcard/WhatsApp/Databases/`
+6. **WhatsApp Business Backup Locations**:
+   - `/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Databases/`
+   - `/sdcard/Android/media/com.whatsapp.w4b/WhatsApp/Databases/`
+
+#### 2. Automatic Selection Decision Flow:
+- **Case A: Exactly One Readable Database Exists**
+  - Automatically selects the candidate and proceeds immediately to Chat Date Discovery.
+  - Confirms candidate filename, source, size, verified message count, and timestamp span.
+- **Case B: Multiple Readable Databases Exist**
+  - Displays a structured, numbered table displaying filenames, paths, sizes, verified message counts, and available date ranges.
+  - Allows selecting any candidate `[1-N]`, choosing the newest valid candidate `[N]` based on verified filesystem metadata (with explicit disclaimer that newer files do not guarantee more complete history), manual import `[M]`, or back `[0]`.
+- **Case C: Encrypted Candidates Exist (No Readable Database)**
+  - Displays discovered encrypted candidates with format version (`CRYPT14`, `CRYPT15`) and key status.
+  - Provides a dedicated 5-action resolution menu:
+    ```text
+    [1] Inspect database metadata
+    [2] Check for supported decryption material
+    [3] Scan additional accessible locations
+    [4] Select an existing local database or backup
+    [5] Back
+    ```
+- **Case D: No Database Candidates Discovered**
+  - Executes a discovery pass across all configured and device paths before reporting the result.
+  - Diagnoses and clearly distinguishes:
+    - ADB executable not found / unavailable
+    - Device disconnected
+    - Device unauthorized (screen lock prompt required)
+    - Device offline (unstable USB cable)
+    - Android storage permission denied or inaccessible
+  - Offers next actions: `[1] Rescan accessible locations`, `[2] Import or select a database manually`, `[0] Back`.
+
+#### 3. Chat Date Discovery & Timeline Interface:
+Once a readable database is selected, WRS opens it in read-only mode (`mode=ro`), parses message timestamps from `message` or `messages` tables, and displays:
 
 ```text
 ========================================================
-       WRS — VIEW AVAILABLE CHAT DATES
+              WRS — CHAT DATE DISCOVERY
 ========================================================
 
-AVAILABLE MESSAGE DATES
+Database     : msgstore.db
+Source       : Previously acquired database
+Status       : Readable
+Messages     : 4,821
+Oldest date  : 14-03-2022 09:15
+Newest date  : 28-10-2026 11:30
 
-[1]  14-03-2022  | 145 messages
-[2]  15-03-2022  | 89 messages
-[3]  19-03-2022  | 210 messages
-[4]  02-04-2022  | 54 messages
-...
-
-Date Selection Options:
-  [A]     Select All Available Dates
-  [1-N]   Specific Date(s) (comma-separated, e.g. 1,3,5)
-  [0]     Back
+[1] View all available dates
+[2] Select a custom date range
+[3] Select conversations
+[4] Export selected readable messages
+[5] Rescan for other databases
+[0] Back
 ```
 
-Derives dates strictly from message timestamps, never filesystem metadata.
+#### 4. Date-Range Filtering (Inclusive & Strictly Validated):
+- Under `[2] Select a custom date range`, user enters:
+  - `Start date (DD-MM-YYYY): `
+  - `End date   (DD-MM-YYYY): `
+- Rigorously validated:
+  - Format must be `DD-MM-YYYY`.
+  - Rejects impossible calendar dates (e.g. 31-02-2024 or month > 12).
+  - Rejects end dates preceding start dates.
+  - Expands boundaries to inclusive intervals (`00:00:00.000` of start date to `23:59:59.999` of end date).
+  - Filters message records matching the exact interval and exports to HTML, JSON, TXT, and CSV.
+
+#### 5. Supported Formats & Decryption Limitations:
+- **Directly Supported Readable Formats**: Unencrypted SQLite databases matching modern (`message`) or classic (`messages`) WhatsApp schemas.
+- **Supported Encrypted Formats (with legitimate key material)**: WhatsApp Crypt14 and Crypt15 AES-GCM-256 databases (`msgstore.db.crypt14`, `msgstore.db.crypt15`) using a legitimate 158-byte WhatsApp key file (or 32-byte raw key for Crypt15).
+- **Unsupported Formats / Known Limitations**:
+  - Legacy Crypt8, Crypt10, and Crypt12 files: Can be identified and cataloged, but automated decryption is unsupported without legacy custom key-derivation material.
+  - Private App Storage on Non-Rooted Devices: WhatsApp private databases at `/data/data/com.whatsapp/databases/` are protected by Android SELinux and sandbox permissions. WRS operates 100% safely and non-destructively; it does not attempt device rooting, exploits, or silent modifications. Private databases must be acquired via ADB backup or root access prior to analysis.
+  - Zero Data Fabrication: Dates, message counts, and recovery states are never invented. If a database contains corrupted or zero timestamped messages, WRS explicitly explains why dates cannot be determined.
 
 ---
 

@@ -8,9 +8,11 @@ structured error handling, persistent configuration, and headless automation.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import platform
+import shutil
 import sys
 import time
 from datetime import datetime
@@ -88,6 +90,13 @@ from .ui import (
     print_table_data,
     print_warning,
     set_force_no_color,
+)
+from .db_discovery import (
+    ChatDatabaseCandidate,
+    ChatDatabaseRegistry,
+    DatabaseDiscoveryResult,
+    DatabaseDiscoveryService,
+    inspect_sqlite_chat_dates,
 )
 
 logger = logging.getLogger("wrs.cli")
@@ -1553,72 +1562,487 @@ def recovery_wizard_flow(
             print("[!] Invalid operation choice. Enter a number between 0 and 7.")
 
 
+def _inspect_candidates_metadata(candidates: List[ChatDatabaseCandidate]) -> None:
+    """Display comprehensive forensic metadata for discovered candidates."""
+    print("\n" + "=" * 56)
+    print("       DATABASE CANDIDATE METADATA")
+    print("=" * 56)
+    for idx, c in enumerate(candidates, start=1):
+        print(f"Candidate [{idx}]: {c.filename}")
+        print(f"  • Source Location : {c.source} ({c.path})")
+        print(f"  • Format Type     : {c.format_type}")
+        print(f"  • File Size       : {c.size_human} ({c.size_bytes:,} bytes)")
+        print(f"  • Accessible      : {'Yes' if c.is_accessible else 'No'}")
+        print(f"  • Encrypted       : {'Yes' if c.is_encrypted else 'No'}")
+        print(f"  • Decryption Key  : {'Found in directory' if c.has_key else 'Required / Unavailable'}")
+        print(f"  • Readable SQLite : {'Yes' if c.is_readable else 'No'}")
+        if c.is_readable:
+            print(f"  • Messages Found  : {c.message_count:,}")
+            print(f"  • Oldest Message  : {c.oldest_timestamp or 'Unknown'}")
+            print(f"  • Newest Message  : {c.newest_timestamp or 'Unknown'}")
+        if c.sha256:
+            print(f"  • SHA-256 Hash    : {c.sha256}")
+        if c.validation_notes:
+            print(f"  • Analysis Notes  : {c.validation_notes}")
+        print()
+    input("Press Enter to continue...")
+
+
+def _handle_decryption_action(
+    candidates: List[ChatDatabaseCandidate],
+    service: DatabaseDiscoveryService,
+) -> Optional[ChatDatabaseCandidate]:
+    """Guide user through legitimate decryption of supported encrypted databases with verified key material."""
+    if not candidates:
+        print("[!] No encrypted database candidates available to decrypt.")
+        return None
+
+    chosen: ChatDatabaseCandidate
+    if len(candidates) == 1:
+        chosen = candidates[0]
+        print(f"\n[*] Selected candidate for decryption: {chosen.filename} ({chosen.format_type})")
+    else:
+        print("\nSelect an encrypted database candidate to decrypt:")
+        for idx, c in enumerate(candidates, start=1):
+            key_tag = " [Key file detected in folder]" if c.has_key else ""
+            print(f"  [{idx}] {c.filename} ({c.format_type}, {c.size_human}){key_tag}")
+        print("  [0] Cancel\n")
+        pick = input(f"Choose candidate [1-{len(candidates)} / 0]: ").strip()
+        if pick == "0" or not pick.isdigit() or not (1 <= int(pick) <= len(candidates)):
+            return None
+        chosen = candidates[int(pick) - 1]
+
+    if chosen.source == "DEVICE_STORAGE":
+        print(f"\n[!] Candidate '{chosen.filename}' is on remote Android device storage ({chosen.path}).")
+        print("    Remote files cannot be decrypted directly in place.")
+        print("    Please acquire the database first using Option [1] -> [2] File Acquisition.")
+        return None
+
+    src_p = Path(chosen.path)
+    if not src_p.is_file():
+        print(f"[!] File not found on disk: {src_p}")
+        return None
+
+    default_key = src_p.parent / "key"
+    key_prompt = "Enter path to WhatsApp decryption key file: "
+    if default_key.is_file() and default_key.stat().st_size in (158, 32):
+        key_prompt = f"Enter path to WhatsApp key file (press Enter to use '{default_key}'): "
+
+    key_input = input(key_prompt).strip()
+    key_path: Path
+    if not key_input:
+        if default_key.is_file():
+            key_path = default_key
+        else:
+            print("[*] Decryption cancelled: No key file provided.")
+            return None
+    else:
+        key_path = Path(key_input).resolve()
+
+    if not key_path.is_file():
+        print(f"[!] Decryption key file does not exist: {key_path}")
+        return None
+
+    key_sz = key_path.stat().st_size
+    if key_sz not in (158, 32):
+        print(f"[!] Warning: WhatsApp decryption key files are 158 bytes (or 32 bytes for raw crypt15 hex).")
+        print(f"    Provided file is {key_sz} bytes. Decryption may fail.")
+
+    out_dir = Path("recovery")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dec_dest = out_dir / f"{src_p.stem}_decrypted.db"
+
+    print(f"\n[*] Attempting decryption using legitimate key material...")
+    print(f"    Source   : {src_p.name}")
+    print(f"    Key File : {key_path.name} ({key_sz} bytes)")
+    print(f"    Output   : {dec_dest}")
+
+    ok, err_msg = WhatsAppDatabaseAnalyzer.decrypt_crypt_database(src_p, key_path, dec_dest)
+    if not ok:
+        print(f"[!] Decryption failed: {err_msg}")
+        return None
+
+    if not dec_dest.is_file() or dec_dest.stat().st_size == 0:
+        print("[!] Verification failed: Resulting decrypted file is empty or missing.")
+        return None
+
+    try:
+        with open(dec_dest, "rb") as f:
+            hdr = f.read(16)
+        if not hdr.startswith(b"SQLite format 3\x00"):
+            print("[!] Verification failed: Output does not have a valid SQLite database header.")
+            return None
+    except OSError as e:
+        print(f"[!] Verification read error: {e}")
+        return None
+
+    is_readable, cnt, old_s, new_s, old_dt, new_dt, notes = inspect_sqlite_chat_dates(dec_dest)
+    sha_hash, _, _ = hash_local_file(dec_dest)
+    st = dec_dest.stat()
+
+    new_cand = ChatDatabaseCandidate(
+        path=str(dec_dest.resolve()),
+        filename=dec_dest.name,
+        size_bytes=st.st_size,
+        source="DECRYPTED_CANDIDATE",
+        format_type="SQLITE",
+        is_sqlite=True,
+        is_encrypted=False,
+        is_readable=is_readable,
+        is_accessible=True,
+        has_key=True,
+        decrypted_path=str(dec_dest.resolve()),
+        message_count=cnt,
+        oldest_timestamp=old_s,
+        newest_timestamp=new_s,
+        oldest_dt=old_dt,
+        newest_dt=new_dt,
+        modified_timestamp=datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+        mtime_epoch=st.st_mtime,
+        sha256=sha_hash or "",
+        validation_notes=f"Successfully decrypted from {chosen.filename}. {notes}",
+    )
+    service.registry.register(new_cand)
+
+    print("\n" + "=" * 56)
+    print("       DECRYPTION AND VERIFICATION SUCCESSFUL")
+    print("=" * 56)
+    print(f"Decrypted Database : {new_cand.filename}")
+    print(f"Verified Messages  : {new_cand.message_count:,}")
+    print(f"Oldest Date        : {new_cand.oldest_timestamp or 'Unavailable'}")
+    print(f"Newest Date        : {new_cand.newest_timestamp or 'Unavailable'}")
+    print(f"Integrity SHA-256  : {new_cand.sha256[:16]}... verified")
+
+    return new_cand
+
+
+def _scan_additional_location_action(settings: dict[str, Any]) -> None:
+    """Prompt user to add an additional local directory to configured search paths."""
+    print("\n" + "-" * 56)
+    print("SCAN ADDITIONAL ACCESSIBLE LOCATIONS")
+    print("-" * 56)
+    path_str = input("Enter local directory path to scan (or press Enter to cancel): ").strip()
+    if not path_str:
+        return
+
+    p = Path(path_str).resolve()
+    if not p.is_dir():
+        print(f"[!] Directory does not exist or is not accessible: {p}")
+        return
+
+    search_paths = settings.setdefault("storage", {}).setdefault("local_search_paths", [])
+    p_str = str(p)
+    if p_str not in search_paths:
+        search_paths.append(p_str)
+        save_settings(settings)
+        print(f"[+] Added directory to configured search paths: {p_str}")
+    else:
+        print(f"[*] Directory is already in configured search paths: {p_str}")
+
+
+def _prompt_manual_database_import(service: DatabaseDiscoveryService) -> Optional[ChatDatabaseCandidate]:
+    """Explicit manual database selection and registration."""
+    print("\n" + "-" * 56)
+    print("MANUAL DATABASE IMPORT / SELECTION")
+    print("-" * 56)
+    path_str = input("Enter path to local database or backup file (or press Enter to cancel): ").strip()
+    if not path_str:
+        return None
+
+    p = Path(path_str).resolve()
+    if not p.is_file():
+        print(f"[!] Specified file does not exist or is not a regular file: {p}")
+        return None
+
+    try:
+        sz = p.stat().st_size
+        st_mtime = p.stat().st_mtime
+        mtime = datetime.fromtimestamp(st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        sha_hash, _, _ = hash_local_file(p)
+        cand = ChatDatabaseCandidate(
+            path=str(p),
+            filename=p.name,
+            size_bytes=sz,
+            source="MANUAL_IMPORT",
+            format_type="UNKNOWN",
+            modified_timestamp=mtime,
+            mtime_epoch=st_mtime,
+            sha256=sha_hash or "",
+        )
+        service._evaluate_local_candidate(cand)
+        service.registry.register(cand)
+
+        if cand.is_readable:
+            print(f"\n[+] Successfully imported readable database: {cand.filename}")
+            print(f"    Messages: {cand.message_count:,} | Dates: {cand.oldest_timestamp} to {cand.newest_timestamp}")
+            return cand
+        elif cand.is_encrypted:
+            print(f"\n[*] Imported encrypted WhatsApp database: {cand.filename} ({cand.format_type})")
+            print("    Decryption key material will be required to read messages.")
+            return cand
+        else:
+            print(f"\n[!] Imported file could not be recognized as a valid WhatsApp database.")
+            print(f"    {cand.validation_notes}")
+            return None
+    except (OSError, PermissionError) as e:
+        print(f"[!] Could not access file: {e}")
+        return None
+
+
+def select_or_discover_chat_database_interactive(
+    executor: Optional[AdbExecutor] = None,
+    device: Optional[DeviceInfo] = None,
+    settings: Optional[dict[str, Any]] = None,
+    registry: Optional[ChatDatabaseRegistry] = None,
+) -> Optional[ChatDatabaseCandidate]:
+    """Execute automatic multi-stage database discovery and decision flow (Cases A-D).
+
+    Searches in order:
+    1. Previously discovered database candidates recorded in registry
+    2. WRS acquisition and recovery output directories
+    3. Existing WRS project-configured scan directories & local working paths
+    4. Accessible WhatsApp storage on connected, authorized Android device via ADB
+    5. Common WhatsApp backup locations (standard Android paths)
+    6. WhatsApp Business backup locations (com.whatsapp.w4b)
+    """
+    exec_inst = executor or AdbExecutor()
+    st_inst = settings or load_settings()
+    service = DatabaseDiscoveryService(executor=exec_inst, settings=st_inst, registry=registry)
+
+    while True:
+        print("\n" + "=" * 56)
+        print("       WRS — DATABASE DISCOVERY")
+        print("=" * 56)
+        print("[*] Automatically scanning discovery locations for chat databases:")
+        print("    • Registered database candidates")
+        print("    • WRS recovery & acquisition directories")
+        print("    • Configured scan directories")
+        print("    • Connected Android device storage (ADB)")
+
+        result = service.discover_all(device=device)
+
+        # CASE A: Exactly one readable database exists
+        if len(result.readable_candidates) == 1:
+            chosen = result.readable_candidates[0]
+            print("\n" + "-" * 56)
+            print("[+] Automatically selected readable chat database:")
+            print(f"    Database     : {chosen.filename}")
+            print(f"    Source       : {chosen.source}")
+            print(f"    Location     : {chosen.path}")
+            print(f"    Size         : {chosen.size_human}")
+            print(f"    Messages     : {chosen.message_count:,}")
+            if chosen.oldest_timestamp and chosen.newest_timestamp:
+                print(f"    Date Range   : {chosen.oldest_timestamp} to {chosen.newest_timestamp}")
+            print("-" * 56)
+            return chosen
+
+        # CASE B: Multiple readable databases exist
+        elif len(result.readable_candidates) > 1:
+            print(f"\n[*] Discovered {len(result.readable_candidates)} readable chat database(s):\n")
+            newest_cand = max(result.readable_candidates, key=lambda c: c.mtime_epoch)
+
+            if HAS_RICH and console:
+                tbl = Table(title="Discovered Readable Chat Databases", show_header=True, header_style="bold cyan")
+                tbl.add_column("#", style="bold yellow", width=4)
+                tbl.add_column("Database", style="bold white", width=22)
+                tbl.add_column("Size", justify="right", style="cyan", width=12)
+                tbl.add_column("Messages", justify="right", style="green", width=12)
+                tbl.add_column("Available Dates", style="magenta", width=30)
+                tbl.add_column("Modified", style="dim", width=20)
+                for idx, c in enumerate(result.readable_candidates, start=1):
+                    dates_lbl = (
+                        f"{c.oldest_timestamp} to {c.newest_timestamp}"
+                        if (c.oldest_timestamp and c.newest_timestamp)
+                        else "No timestamped msgs"
+                    )
+                    tag = " (Newest)" if c.path == newest_cand.path else ""
+                    tbl.add_row(
+                        str(idx),
+                        f"{c.filename}{tag}",
+                        c.size_human,
+                        f"{c.message_count:,}",
+                        dates_lbl,
+                        c.modified_timestamp or "Unknown",
+                    )
+                console.print(tbl)
+            else:
+                for idx, c in enumerate(result.readable_candidates, start=1):
+                    dates_lbl = (
+                        f"{c.oldest_timestamp} to {c.newest_timestamp}"
+                        if (c.oldest_timestamp and c.newest_timestamp)
+                        else "No timestamped messages"
+                    )
+                    is_newest_tag = " [NEWEST BY FILE TIMESTAMP]" if c.path == newest_cand.path else ""
+                    print(f"  [{idx}] {c.filename}{is_newest_tag}")
+                    print(f"      Path     : {c.path}")
+                    print(f"      Size     : {c.size_human} | Modified: {c.modified_timestamp}")
+                    print(f"      Messages : {c.message_count:,} | Dates: {dates_lbl}")
+                    print()
+
+            print("Selection Options:")
+            print(f"  [1-{len(result.readable_candidates)}] Select specific database")
+            print(f"  [N]   Choose newest valid candidate ({newest_cand.filename})")
+            print("        Selection Rule: Selects candidate with the latest verified filesystem")
+            print("        modification timestamp. (Note: A newer file does not automatically")
+            print("        guarantee more complete chat history.)")
+            print("  [M]   Import or select a database manually")
+            print("  [0]   Back\n")
+
+            sel = input(f"Select database [1-{len(result.readable_candidates)} / N / M / 0]: ").strip().lower()
+            if sel == "0" or sel == "back":
+                return None
+            elif sel in ("n", "new", "newest"):
+                print(f"\n[+] Selected newest database candidate: {newest_cand.filename}")
+                return newest_cand
+            elif sel in ("m", "manual"):
+                manual_cand = _prompt_manual_database_import(service)
+                if manual_cand:
+                    return manual_cand
+                continue
+            elif sel.isdigit():
+                val = int(sel)
+                if 1 <= val <= len(result.readable_candidates):
+                    chosen = result.readable_candidates[val - 1]
+                    print(f"\n[+] Selected database candidate: {chosen.filename}")
+                    return chosen
+                else:
+                    print(f"[!] Invalid selection. Please enter a number between 1 and {len(result.readable_candidates)}.")
+                    continue
+            else:
+                print("[!] Unrecognized choice.")
+                continue
+
+        # CASE C: Encrypted candidates exist, but no readable database exists
+        elif len(result.encrypted_candidates) > 0:
+            print("\n" + "=" * 56)
+            print("       WRS — ENCRYPTED DATABASE CANDIDATES")
+            print("=" * 56)
+            print("[!] No readable chat database source is currently available.")
+            print(f"    Discovered {len(result.encrypted_candidates)} encrypted candidate(s) requiring key material:\n")
+
+            if HAS_RICH and console:
+                tbl = Table(title="Discovered Encrypted Database Candidates", show_header=True, header_style="bold yellow")
+                tbl.add_column("#", style="bold yellow", width=4)
+                tbl.add_column("Candidate File", style="bold white", width=26)
+                tbl.add_column("Format", style="cyan", width=12)
+                tbl.add_column("Size", justify="right", style="cyan", width=12)
+                tbl.add_column("Key Status", style="green", width=24)
+                tbl.add_column("Location", style="dim", width=36)
+                for idx, c in enumerate(result.encrypted_candidates, start=1):
+                    key_str = "Key detected in folder" if c.has_key else "Key required"
+                    tbl.add_row(
+                        str(idx),
+                        c.filename,
+                        c.format_type,
+                        c.size_human,
+                        key_str,
+                        c.path,
+                    )
+                console.print(tbl)
+            else:
+                for idx, c in enumerate(result.encrypted_candidates, start=1):
+                    key_str = "Key file detected" if c.has_key else "Decryption key required"
+                    print(f"  [{idx}] {c.filename} ({c.format_type})")
+                    print(f"      Location: {c.path}")
+                    print(f"      Size    : {c.size_human} | Status: {key_str}")
+
+            print("\nAvailable Actions:")
+            print("[1] Inspect database metadata")
+            print("[2] Check for supported decryption material")
+            print("[3] Scan additional accessible locations")
+            print("[4] Select an existing local database or backup")
+            print("[5] Back\n")
+
+            c_act = input("Select an action [1-5]: ").strip()
+            if c_act == "1":
+                _inspect_candidates_metadata(result.encrypted_candidates)
+            elif c_act == "2":
+                dec_cand = _handle_decryption_action(result.encrypted_candidates, service)
+                if dec_cand:
+                    return dec_cand
+            elif c_act == "3":
+                _scan_additional_location_action(st_inst)
+            elif c_act == "4":
+                man_cand = _prompt_manual_database_import(service)
+                if man_cand:
+                    return man_cand
+            elif c_act in ("5", "0", "back"):
+                return None
+            else:
+                print("[!] Invalid action choice. Enter a number between 1 and 5.")
+
+        # CASE D: No database candidates exist
+        else:
+            rec_base = st_inst.get("acquisition", {}).get("default_recovery_dir", "recovery")
+            print("\n" + "=" * 56)
+            print("       WRS — DATABASE DISCOVERY REPORT")
+            print("=" * 56)
+            print("[!] No WhatsApp database candidates discovered.\n")
+            print("Diagnostic Summary:")
+            print(f"  • Locations Searched : {len(result.locations_searched)} locations")
+            print(f"  • Local Directories  : {rec_base} (and configured scan directories)")
+            print(f"  • ADB Service        : {result.adb_status_str}")
+            print(f"  • Android Device     : {result.device_status_str}\n")
+
+            if not result.adb_available:
+                print("Condition: ADB executable is not installed or not in PATH.")
+                print("           Only local directories were searched.")
+            elif "Unauthorized" in result.device_status_str:
+                print("Condition: Android device is connected but UNAUTHORIZED.")
+                print("           Unlock the phone and accept the 'Allow USB debugging' prompt.")
+            elif "Offline" in result.device_status_str:
+                print("Condition: Android device is in OFFLINE state.")
+                print("           Reconnect USB cable or toggle USB debugging.")
+            elif "No Device Connected" in result.device_status_str or "Disconnected" in result.device_status_str:
+                print("Condition: No Android phone is currently connected to this computer.")
+                print("           Connect a device with USB debugging enabled, or acquire a database first.")
+            else:
+                print("Condition: Accessible WhatsApp database directories were scanned, but")
+                print("           no msgstore.db or .crypt files were found.")
+
+            print("\nNext Actions:")
+            print("[1] Rescan accessible locations")
+            print("[2] Import or select a database manually")
+            print("[0] Back\n")
+
+            d_act = input("Select an action [0-2]: ").strip()
+            if d_act == "1":
+                continue
+            elif d_act == "2":
+                man_cand = _prompt_manual_database_import(service)
+                if man_cand:
+                    return man_cand
+            else:
+                return None
+
+
 def recover_chat_history_interactive(
     device: Optional[DeviceInfo],
     settings: dict[str, Any],
+    executor: Optional[AdbExecutor] = None,
 ) -> None:
-    """Chat History Availability Discovery & Date-Range Recovery (Phase 4, Option [3])."""
+    """Chat History Availability Discovery & Date-Range Recovery (Option [3])."""
     dev_name = device.display_name if device else "NONE DETECTED"
 
     print("\n" + "=" * 56)
     print("       WRS — RECOVER CHAT HISTORY")
     print("=" * 56)
 
-    # 1. Look for existing databases in recovery folder or prompt user
-    candidates = find_chat_database_candidates("recovery")
-    chosen_db: Optional[Path] = None
-
-    if candidates:
-        print(f"[*] Found {len(candidates)} database candidate(s) in local recovery:")
-        for idx, c in enumerate(candidates[:5], start=1):
-            meta = WhatsAppDatabaseAnalyzer.identify_database(c)
-            fmt_lbl = f"Encrypted ({meta.crypt_version})" if meta.is_encrypted else ("SQLite" if meta.is_sqlite else "Unknown")
-            print(f"  [{idx}] {c.name} ({format_bytes(meta.size_bytes)}) - {fmt_lbl}")
-        if len(candidates) > 5:
-            print(f"  ... and {len(candidates) - 5} more.")
-        print("  [C] Custom path to database")
-        print("  [0] Back")
-
-        pick = input("\nSelect candidate [1-N / C / 0]: ").strip().lower()
-        if pick == "0":
-            return
-        elif pick == "c":
-            p_in = input("Enter path to database file: ").strip()
-            if p_in:
-                chosen_db = Path(p_in).resolve()
-        elif pick.isdigit() and 1 <= int(pick) <= min(len(candidates), 5):
-            chosen_db = candidates[int(pick) - 1]
-
-    if not chosen_db:
-        if not candidates:
-            p_in = input("Enter path to database file (or press Enter to view chat status): ").strip()
-            if p_in:
-                chosen_db = Path(p_in).resolve()
-
-    # 2. If no readable database established, show CHAT HISTORY STATUS screen (Section 6)
-    if not chosen_db or not chosen_db.exists():
-        print("\n" + "=" * 56)
-        print("       CHAT HISTORY STATUS")
-        print("=" * 56)
-        print("No readable chat source has been established.\n")
-        print("Possible reasons:")
-        print("- No database or backup was found in accessible locations.")
-        print("- The available database is encrypted and cannot currently be processed.")
-        print("- The source format is unsupported.")
-        print("- The available files contain media but no readable messages.\n")
-        print("No chat records have been reconstructed.\n")
-        print("Next actions:")
-        print("[1] Scan additional accessible locations")
-        print("[2] Inspect discovered database candidates")
-        print("[3] Import an existing supported chat export")
-        print("[0] Back\n")
-
-        act = input("Select an action [0-3]: ").strip()
-        if act == "2":
-            inspect_backups_and_databases_interactive(AdbExecutor(), device, settings)
+    # 1. Automatically discover and select suitable database
+    chosen_cand = select_or_discover_chat_database_interactive(
+        executor=executor,
+        device=device,
+        settings=settings,
+    )
+    if not chosen_cand:
         return
 
-    # 3. Check encryption and extract messages
+    chosen_db = Path(chosen_cand.path)
+    if not chosen_db.exists():
+        print(f"[!] Database file does not exist: {chosen_db}")
+        return
+
+    # 2. Check encryption and extract messages
     meta = WhatsAppDatabaseAnalyzer.identify_database(chosen_db)
     active_db = chosen_db
     if meta.is_encrypted:
@@ -1832,60 +2256,40 @@ def recover_chat_history_interactive(
         return
 
 
-def view_available_chat_dates_interactive(
-    device: Optional[DeviceInfo],
-    settings: dict[str, Any],
-) -> None:
-    """Chronological Available-Date Calendar (Phase 4, Option [6])."""
-    print("\n" + "=" * 56)
-    print("       WRS — VIEW AVAILABLE CHAT DATES")
-    print("=" * 56)
+def _perform_export_conversations(convs: List[Conversation], sub_label: str) -> Path:
+    """Export list of conversations to HTML, JSON, TXT, and CSV in recovery directory."""
+    out_d = Path("recovery") / f"{sub_label}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+    out_d.mkdir(parents=True, exist_ok=True)
+    exported_count = 0
+    for c in convs:
+        s_name = sanitize_filename(c.display_name)[:30]
+        if not s_name:
+            s_name = f"conversation_{exported_count + 1}"
+        ChatExporter.export_conversation_html(c, out_d / f"{s_name}.html")
+        ChatExporter.export_conversation_json(c, out_d / f"{s_name}.json")
+        ChatExporter.export_conversation_txt(c, out_d / f"{s_name}.txt")
+        ChatExporter.export_conversation_csv(c, out_d / f"{s_name}.csv")
+        exported_count += 1
+    print(f"\n[+] Exported {exported_count} conversation(s) in HTML, JSON, TXT, CSV format.")
+    print(f"    Export directory: {out_d}")
+    return out_d
 
-    candidates = find_chat_database_candidates("recovery")
-    chosen_db: Optional[Path] = None
-    if candidates:
-        chosen_db = candidates[0]
-    else:
-        p_in = input("Enter path to readable database file: ").strip()
-        if p_in:
-            chosen_db = Path(p_in).resolve()
 
-    if not chosen_db or not chosen_db.exists():
-        print("[!] No readable chat database found. Please acquire or inspect a database first.")
-        return
-
-    meta = WhatsAppDatabaseAnalyzer.identify_database(chosen_db)
-    active_db = chosen_db
-    if meta.is_encrypted:
-        key_str = input("Database is encrypted. Enter path to key file (leave blank to cancel): ").strip()
-        if not key_str:
-            return
-        dec_dest = chosen_db.parent / f"{chosen_db.stem}_decrypted.db"
-        ok, msg = WhatsAppDatabaseAnalyzer.decrypt_crypt_database(chosen_db, Path(key_str).resolve(), dec_dest)
-        if not ok:
-            print(f"[!] Decryption failed: {msg}")
-            return
-        active_db = dec_dest
-
-    raw_msgs = WhatsAppDatabaseAnalyzer.extract_raw_messages(active_db)
-    convs = ChatReconstructionEngine.reconstruct_conversations(raw_msgs)
-    timeline = DateRangeEngine.extract_timeline(convs)
-
-    if not timeline.dates_calendar:
-        print("[!] No readable messages with valid timestamps found in this database.")
-        return
-
-    print("\nAVAILABLE MESSAGE DATES\n")
+def _display_dates_calendar(convs: List[Conversation], timeline: Any) -> None:
+    """Display chronological calendar of available message dates with counts and selection options."""
+    print("\n" + "-" * 56)
+    print("AVAILABLE MESSAGE DATES (CHRONOLOGICAL)")
+    print("-" * 56)
     sorted_dates = list(timeline.dates_calendar.keys())
     for idx, d_str in enumerate(sorted_dates[:40], start=1):
         cnt = timeline.dates_calendar[d_str]
-        print(f"[{idx:<2}] {d_str}  | {cnt} messages")
+        print(f"  [{idx:<2}] {d_str}  | {cnt:,} messages")
     if len(sorted_dates) > 40:
-        print(f"... and {len(sorted_dates) - 40} more dates.")
+        print(f"  ... and {len(sorted_dates) - 40} more dates.")
 
     print("\nDate Selection Options:")
     print("  [A]     Select All Available Dates")
-    print("  [1-N]   Specific Date(s) (comma-separated, e.g. 1,3,5)")
+    print("  [1-N]   Specific Date(s) (comma-separated, e.g. 1, 3, 5)")
     print("  [0]     Back\n")
 
     sel = input("Your choice: ").strip()
@@ -1907,18 +2311,183 @@ def view_available_chat_dates_interactive(
 
     filtered_convs, excluded_missing = DateRangeEngine.filter_conversations_by_specific_dates(convs, target_dates)
     total_msgs = sum(len(c.messages) for c in filtered_convs)
-    print(f"\n[+] Selected {len(target_dates)} date(s), matching {total_msgs} messages across {len(filtered_convs)} conversations.")
+    print(f"\n[+] Selected {len(target_dates)} date(s), matching {total_msgs:,} message(s) across {len(filtered_convs)} conversation(s).")
+    if excluded_missing > 0:
+        print(f"    (Excluded {excluded_missing} messages with missing/unparseable timestamps)")
 
-    export_ans = input("Export these selected records? [y/N]: ").strip().lower()
+    export_ans = input("\nExport these selected records? [y/N]: ").strip().lower()
     if export_ans in ("y", "yes"):
-        out_d = Path("recovery") / f"dates_export_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
-        out_d.mkdir(parents=True, exist_ok=True)
-        for c in filtered_convs:
-            s_name = sanitize_filename(c.display_name)[:30]
-            ChatExporter.export_conversation_html(c, out_d / f"{s_name}.html")
-            ChatExporter.export_conversation_json(c, out_d / f"{s_name}.json")
-            ChatExporter.export_conversation_txt(c, out_d / f"{s_name}.txt")
-        print(f"[+] Export saved to: {out_d}")
+        _perform_export_conversations(filtered_convs, f"dates_export_{len(target_dates)}_days")
+
+
+def _handle_custom_date_range(convs: List[Conversation], timeline: Any) -> None:
+    """Inclusive custom date-range selection (DD-MM-YYYY) with validation and message filtering."""
+    print("\n" + "-" * 56)
+    print("CUSTOM DATE RANGE SELECTION (INCLUSIVE)")
+    print("-" * 56)
+    print(f"Oldest available date : {timeline.oldest_formatted}")
+    print(f"Newest available date : {timeline.newest_formatted}\n")
+    print("Enter target boundaries in DD-MM-YYYY format.")
+    print("Both start date and end date are fully inclusive.\n")
+
+    start_str = input("Start date (DD-MM-YYYY): ").strip()
+    if not start_str or start_str.lower() in ("0", "back", "cancel"):
+        return
+    end_str = input("End date   (DD-MM-YYYY): ").strip()
+    if not end_str or end_str.lower() in ("0", "back", "cancel"):
+        return
+
+    valid, inc_start, inc_end, msg = DateRangeEngine.validate_date_range(
+        start_str=start_str,
+        end_str=end_str,
+        min_dt=timeline.oldest_dt,
+        max_dt=timeline.newest_dt,
+    )
+
+    if not valid or not inc_start or not inc_end:
+        print(f"\n[!] Invalid date range: {msg}")
+        return
+
+    if "Partial overlap" in msg:
+        print(f"\n[*] {msg}")
+
+    filtered_convs, excluded_missing = DateRangeEngine.filter_conversations_by_date(
+        convs, inc_start, inc_end
+    )
+    total_msgs = sum(len(c.messages) for c in filtered_convs)
+
+    if total_msgs == 0:
+        print(f"\n[!] The selected date range ({start_str} to {end_str}) contains no readable messages.")
+        return
+
+    print(f"\n[+] Found {total_msgs:,} message(s) across {len(filtered_convs)} conversation(s) between {start_str} and {end_str}.")
+    if excluded_missing > 0:
+        print(f"    (Excluded {excluded_missing} messages with missing/unparseable timestamps)")
+
+    export_ans = input("\nExport these date-filtered records? [y/N]: ").strip().lower()
+    if export_ans in ("y", "yes"):
+        _perform_export_conversations(filtered_convs, f"range_{start_str}_to_{end_str}")
+
+
+def _handle_conversation_selection(convs: List[Conversation]) -> None:
+    """Filter and export specific conversation threads."""
+    print("\n" + "-" * 56)
+    print("AVAILABLE CONVERSATION THREADS")
+    print("-" * 56)
+    if not convs:
+        print("[!] No conversation threads available.")
+        return
+
+    for idx, c in enumerate(convs[:30], start=1):
+        c_type = "Group" if c.is_group else "Direct"
+        print(f"  [{idx:<2}] {c.display_name[:35]:<35} | {len(c.messages):>4} msgs | {c_type}")
+    if len(convs) > 30:
+        print(f"  ... and {len(convs) - 30} more conversations.")
+
+    print("\nSelection Options:")
+    print("  [1-N] Select conversation(s) (comma-separated, e.g. 1, 2, 4)")
+    print("  [0]   Back\n")
+
+    sel = input("Your choice: ").strip()
+    if sel == "0" or not sel:
+        return
+
+    tokens = [t.strip() for t in sel.replace(" ", ",").split(",") if t.strip()]
+    selected_convs: List[Conversation] = []
+    for tok in tokens:
+        if tok.isdigit() and 1 <= int(tok) <= len(convs):
+            selected_convs.append(convs[int(tok) - 1])
+
+    if not selected_convs:
+        print("[!] No valid conversations selected.")
+        return
+
+    total_msgs = sum(len(c.messages) for c in selected_convs)
+    print(f"\n[+] Selected {len(selected_convs)} conversation(s) containing {total_msgs:,} message(s).")
+    export_ans = input("\nExport selected conversation(s)? [y/N]: ").strip().lower()
+    if export_ans in ("y", "yes"):
+        _perform_export_conversations(selected_convs, f"selected_{len(selected_convs)}_conversations")
+
+
+def _handle_export_messages(convs: List[Conversation], db_filename: str) -> None:
+    """Export all readable conversation records."""
+    if not convs:
+        print("[!] No conversations available to export.")
+        return
+    total_msgs = sum(len(c.messages) for c in convs)
+    print(f"\n[*] Preparing to export all {len(convs)} conversation(s) ({total_msgs:,} messages).")
+    export_ans = input("Proceed with export? [y/N]: ").strip().lower()
+    if export_ans in ("y", "yes"):
+        stem = Path(db_filename).stem
+        _perform_export_conversations(convs, f"all_chats_{stem}")
+
+
+def view_available_chat_dates_interactive(
+    device: Optional[DeviceInfo],
+    settings: dict[str, Any],
+    executor: Optional[AdbExecutor] = None,
+    registry: Optional[ChatDatabaseRegistry] = None,
+) -> None:
+    """Chronological Available-Date Calendar & Automatic Chat Database Discovery (Option [6])."""
+    exec_inst = executor or AdbExecutor()
+    while True:
+        chosen_cand = select_or_discover_chat_database_interactive(
+            executor=exec_inst,
+            device=device,
+            settings=settings,
+            registry=registry,
+        )
+        if not chosen_cand:
+            return
+
+        active_db = Path(chosen_cand.path)
+        if not active_db.exists():
+            print(f"[!] Selected database path does not exist on disk: {active_db}")
+            return
+
+        # Read messages in read-only mode
+        raw_msgs = WhatsAppDatabaseAnalyzer.extract_raw_messages(active_db)
+        convs = ChatReconstructionEngine.reconstruct_conversations(raw_msgs)
+        timeline = DateRangeEngine.extract_timeline(convs)
+
+        # Chat Date Discovery screen loop (Section 5)
+        while True:
+            print("\n" + "=" * 56)
+            print("              WRS — CHAT DATE DISCOVERY")
+            print("=" * 56)
+            print(f"Database     : {chosen_cand.filename}")
+            print(f"Source       : {chosen_cand.source}")
+            print(f"Status       : {'Readable' if chosen_cand.is_readable else 'Unreadable'}")
+            print(f"Messages     : {timeline.total_messages:,}")
+            print(f"Oldest date  : {timeline.oldest_formatted}")
+            print(f"Newest date  : {timeline.newest_formatted}")
+            print()
+            print("[1] View all available dates")
+            print("[2] Select a custom date range")
+            print("[3] Select conversations")
+            print("[4] Export selected readable messages")
+            print("[5] Rescan for other databases")
+            print("[0] Back\n")
+
+            sub_choice = input("Select an option [0-5]: ").strip()
+            if sub_choice == "0" or sub_choice.lower() in ("back", "b"):
+                return
+            elif sub_choice == "1":
+                if not timeline.dates_calendar:
+                    print("\n[!] No readable messages with valid timestamps found in this database.")
+                    print("    Explanation: Message table exists, but timestamps are missing or <= 0.")
+                    continue
+                _display_dates_calendar(convs, timeline)
+            elif sub_choice == "2":
+                _handle_custom_date_range(convs, timeline)
+            elif sub_choice == "3":
+                _handle_conversation_selection(convs)
+            elif sub_choice == "4":
+                _handle_export_messages(convs, chosen_cand.filename)
+            elif sub_choice == "5":
+                break  # Break inner loop to rescan for other databases
+            else:
+                print("[!] Invalid option. Enter a number between 0 and 5.")
 
 
 def recover_media_interactive(
@@ -2362,7 +2931,7 @@ def interactive_menu() -> None:
                 active_categories = category_selection_interactive(active_categories)
 
             elif choice == "3":
-                recover_chat_history_interactive(selected_dev, settings)
+                recover_chat_history_interactive(selected_dev, settings, executor=executor)
 
             elif choice == "4":
                 recover_media_interactive(selected_dev, settings, active_categories)
@@ -2371,7 +2940,7 @@ def interactive_menu() -> None:
                 inspect_backups_and_databases_interactive(executor, selected_dev, settings)
 
             elif choice == "6":
-                view_available_chat_dates_interactive(selected_dev, settings)
+                view_available_chat_dates_interactive(selected_dev, settings, executor=executor)
 
             elif choice == "7":
                 export_and_package_menu_interactive(selected_dev)
