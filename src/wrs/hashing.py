@@ -41,6 +41,10 @@ class VerificationRecord:
     timestamp: str
     error_message: Optional[str] = None
 
+    @property
+    def actual_hash(self) -> Optional[str]:
+        return self.destination_sha256
+
 
 def hash_local_file(filepath: Path | str, chunk_size: int = 65536) -> Tuple[Optional[str], int, Optional[str]]:
     """Compute SHA-256 hash and size of a local file via streaming.

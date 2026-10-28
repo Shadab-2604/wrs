@@ -221,6 +221,7 @@ class TestRecoveryWizardBugFix(unittest.TestCase):
                 self.mock_dev,
                 settings={"acquisition": {"default_recovery_dir": str(self.temp_dir)}},
                 active_categories=["Databases and Backups"],
+                legacy_mode=True,
             )
 
             mock_run_wf.assert_called_once()
@@ -775,10 +776,9 @@ class TestPriorityDiscoveryEngine(unittest.TestCase):
         self.mock_executor.check_device_status.return_value = status_res
 
         # Sequence of user inputs:
-        # 1. Review menu: '1' (Use discovered locations and continue)
-        # 2. Main menu: '0' (Exit)
+        # 1. Main menu: '0' (Exit directly since no automatic scan runs at startup)
         with patch("wrs.cli.AdbExecutor", return_value=self.mock_executor), \
-             patch("builtins.input", side_effect=["1", "0"]):
+             patch("builtins.input", side_effect=["0"]):
             with self.assertRaises(SystemExit) as cm:
                 interactive_menu()
             self.assertEqual(cm.exception.code, 0)

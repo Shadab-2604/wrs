@@ -262,7 +262,13 @@ Selected Device  : Google Pixel 7
 
 ## 7. Priority-Based File Discovery & Guided Workflow
 
-WRS enforces a **priority-based, targeted, permission-aware, and user-controlled** discovery workflow before presenting the main recovery menu. It never blindly traverses the entire phone filesystem or root storage.
+WRS enforces a **user-controlled, priority-based, targeted, and permission-aware** discovery and acquisition workflow. **WRS never scans storage automatically at startup**. When launched, it initializes terminal UI, verifies ADB/device status, loads existing scan records, and immediately presents the Main Menu with informational messages:
+```text
+[INFO] Startup checks completed.
+[INFO] No storage scan has been started.
+```
+
+The user must explicitly select an option from the menu to start scanning storage.
 
 ### Guided Application Flow
 ```text
@@ -272,48 +278,183 @@ WRS enforces a **priority-based, targeted, permission-aware, and user-controlled
               Initialize application
                         |
                         v
-              Check ADB and device
+              Check ADB & device status
                         |
                         v
-              Check previous scans
+              Load previous scan records
                         |
                         v
-             PRIORITY-BASED DISCOVERY
+              [INFO] Startup checks completed.
+              [INFO] No storage scan has been started.
                         |
                         v
-             Show loading animation
+                 Display MAIN MENU
                         |
                         v
-          Discover relevant accessible paths
+          Select [1] Scan and Recover Data
                         |
                         v
-             Display scan summary
+        WRS — SCAN AND RECOVERY WIZARD
+        [1] Full Scan
+        [2] Targeted Scan
+        [3] Scan Known WhatsApp Locations
+        [4] Scan Existing WRS Recovery Directories
+        [5] Inspect Previous Scan Results
+        [0] Back
                         |
                         v
-          Show possible locations found
+              Execute selected scan
                         |
                         v
-            User reviews the locations
+           WRS — DISCOVERY SUMMARY
+           (Show actual source paths, counts, sizes)
                         |
                         v
-        Select locations or continue with
-             the recommended locations
+           WRS — RECOVERY DESTINATION
+           (Press Enter for default destination)
                         |
                         v
-              Display MAIN MENU
+        WRS — ACQUISITION CONFIRMATION
+        (Review source integrity, destination & counts)
                         |
                         v
-     User selects a recovery or analysis action
-                        |
-                        v
-        Use the existing discovery results
-                        |
-                        v
-           Request confirmation when needed
-                        |
-                        v
-          Execute the selected operation
+             Copy selected files
 ```
+### Scan and Recovery Wizard (Operation Selection)
+
+When the examiner selects `[ 1] Scan and Recover Data` from the Main Menu, WRS displays an interactive operation wizard:
+
+```text
+========================================================
+       WRS — SCAN AND RECOVERY WIZARD
+========================================================
+
+Device       : <actual selected device>
+Scan status  : Ready
+
+SELECT AN OPERATION
+
+[1] Full Scan
+    Scan prioritized, relevant accessible locations for
+    all supported WhatsApp data categories.
+
+[2] Targeted Scan
+    Scan only selected locations or data categories.
+
+[3] Scan Known WhatsApp Locations
+    Inspect standard WhatsApp database and media paths.
+
+[4] Scan Existing WRS Recovery Directories
+    Find previously acquired data and database candidates.
+
+[5] Inspect Previous Scan Results
+    Review saved discovery results without rescanning.
+
+[0] Back
+
+Select an operation [0-5]:
+```
+
+#### Operation Behaviors:
+- **[1] Full Scan**: Prioritized, comprehensive scan of all authorized WhatsApp data locations (Priorities 1 through 6). Before starting, a Scope Summary is displayed and explicit user confirmation (`[y/N]`) is required.
+- **[2] Targeted Scan**: Focuses inspection on user-selected targets (WhatsApp Messenger only, WhatsApp Business only, or a custom verified local/Android path). It never expands silently into a full scan.
+- **[3] Scan Known WhatsApp Locations**: Focuses specifically on standard WhatsApp database and media paths (Priorities 2, 3, and 4).
+- **[4] Scan Existing WRS Recovery Directories**: Discovers previously acquired local evidence and database candidates in the local `./recovery/` directory (Priority 1).
+- **[5] Inspect Previous Scan Results**: Loads and reviews the most recent saved `discovery_manifest.json` immediately without rescanning storage.
+- **[0] Back**: Returns cleanly to the Main Menu.
+
+### Discovered Locations & Discovery Summary Screen
+
+Following discovery, WRS renders the structured **DISCOVERY SUMMARY** showing verified source paths, categories, file counts, and sizes:
+
+```text
+========================================================
+       WRS — DISCOVERY SUMMARY
+========================================================
+
+Device       : Vivo V2217
+Scan status  : Discovery completed
+Duration     : 2.15s
+
+DISCOVERED LOCATIONS
+--------------------------------------------------------
+[1] /sdcard/Android/media/com.whatsapp/WhatsApp/Databases/
+    Category : WhatsApp database directory
+    Files    : 4
+    Size     : 58.20 MiB
+
+[2] /sdcard/Android/media/com.whatsapp/WhatsApp/Media/
+    Category : WhatsApp media directory
+    Files    : 342
+    Size     : 412.50 MiB
+
+--------------------------------------------------------
+Total matching files : 346
+Total discovered size: 470.70 MiB
+--------------------------------------------------------
+
+[1] Review discovered files
+[2] Select files or categories to acquire
+[3] Acquire selected files
+[4] Return to main menu
+```
+
+### Recovery Destination Prompt
+
+When the user chooses to acquire discovered files (`[3] Acquire selected files`), WRS displays the dedicated destination prompt before copying:
+
+```text
+========================================================
+       WRS — RECOVERY DESTINATION
+========================================================
+
+Selected device : Vivo V2217
+Selected files  : 346
+Selected size   : 470.70 MiB
+
+Default recovery destination:
+/home/bablu/TOOLS/wrs/recovery/Vivo_V2217/scan_2026-10-28_12-30-00
+
+Enter destination path, or press Enter for the default:
+>
+```
+
+#### Destination Rules & Safety Controls:
+1. **Blank Input Defaults**: Pressing Enter on a blank prompt instantly selects the default recovery directory (`recovery/<device>/scan_<timestamp>/`).
+2. **Path Expansion**: Custom paths with `~` are expanded against the user's home directory and resolved to absolute canonical paths.
+3. **Safety & Permission Checks**:
+   - Prohibits Android device paths (e.g. `/sdcard`, `/storage`) as local recovery destinations.
+   - Detects and rejects source/destination overlap to prevent corrupting original files.
+   - Verifies filesystem write permissions and disk space availability.
+4. **Interactive Retry**: If a path is invalid, an explanatory error is displayed with choices to retry or select the default directory.
+
+### Mandatory Pre-Acquisition Confirmation
+
+Before any files are copied from the target device, WRS displays an explicit confirmation preview:
+
+```text
+========================================================
+       WRS — ACQUISITION CONFIRMATION
+========================================================
+
+Device          : Vivo V2217
+Selected files  : 346
+Selected size   : 470.70 MiB
+Destination     : /home/bablu/TOOLS/wrs/recovery/Vivo_V2217/scan_2026-10-28_12-30-00
+Operation       : Copy selected accessible files
+
+Source changes  : None intended
+
+[1] Confirm and start acquisition
+[2] Change destination
+[3] Change file selection
+[0] Cancel
+
+Choose an option:
+```
+
+- **Forensic Evidence Protection**: Original device files are strictly accessed in read-only mode and are **never modified, deleted, or moved**.
+- **Acquisition Manifest**: Every acquired file is hashed using streaming SHA-256 and cataloged with source path, destination path, and file size in `manifests/acquisition_manifest.json`.
 
 ### Discovery Priorities (Order of Execution)
 
@@ -974,38 +1115,38 @@ Acquisition Selection Options:
 Each acquisition generates an isolated, collision-safe directory structure:
 
 ```text
-recovery/
-└── Google_Pixel_7_scan_2026-10-28_10-00-00/
-    ├── metadata/
-    │   ├── device.json                     # Hardware and Android OS properties
-    │   ├── scan_inventory.db               # Persistent SQLite scan catalog with indexes
-    │   ├── acquisition_manifest.json       # Per-file SHA-256 verification manifest
-    │   ├── case_events.jsonl               # Append-only forensic audit trail
-    │   └── errors.json                     # Traversal and transfer error logs
-    ├── Databases/
-    │   ├── msgstore.db.crypt14
-    │   └── wa.db
-    ├── Backups/
-    │   ├── msgstore-2026-10-25.1.db.crypt14
-    │   └── msgstore-2026-10-26.1.db.crypt14
-    ├── Images/
-    ├── Videos/
-    ├── Audio/
-    ├── Voice_Notes/
-    ├── Documents/
-    ├── Stickers/
-    ├── Animated_GIFs/
-    ├── Thumbnails/
-    ├── Other/
-    ├── chats/                              # Reconstructed chat transcripts
-    │   ├── Alice_Smith.txt
-    │   ├── Alice_Smith.html
-    │   ├── Alice_Smith.json
-    │   └── Alice_Smith.csv
-    └── reports/
-        ├── report.html                     # Standalone visual HTML dashboard
-        ├── report.csv                      # RFC-4180 evidence inventory table
-        └── report.json                     # Machine-readable case report
+wrs/
+├── wrs.py
+├── src/
+├── reports/
+└── recovery/
+    └── Vivo_V2217/
+        └── scan_2026-10-28_12-30-00/
+            ├── images/
+            ├── videos/
+            ├── audio/
+            ├── documents/
+            ├── databases/
+            │   ├── msgstore.db.crypt14
+            │   └── wa.db
+            ├── chat_exports/
+            │   ├── Alice_Smith.txt
+            │   └── Alice_Smith.html
+            ├── manifests/
+            │   └── acquisition_manifest.json   # Cryptographic SHA-256 verification manifest
+            ├── metadata/
+            │   ├── device.json                 # Hardware & Android OS properties
+            │   └── scan_inventory.db           # Persistent SQLite scan inventory
+            └── logs/
+                ├── case_events.jsonl           # Append-only audit log
+                └── errors.json                 # Traversal / transfer errors
+
+### Directory Requirements & Safety
+- **Actual Device Name**: Directories are created under the detected device name (e.g. `Vivo_V2217`).
+- **Device Name Sanitization**: Replaces spaces, slashes, and control characters with underscores to prevent path traversal.
+- **Offline / Local Mode**: When no device is attached and local data is analyzed, `recovery/local_import/` is used instead of a fabricated device name.
+- **Collision Safe / Zero Overwrite**: A new timestamped directory is created for each acquisition session (`scan_YYYY-MM-DD_HH-MM-SS`). If a directory already exists, a unique counter suffix (`_1`, `_2`) is appended. Existing sessions and original source files are **never overwritten**.
+- **Segregated Structure**: Manifests and logs are kept in dedicated `manifests/` and `logs/` directories, completely separate from acquired evidence files.
 ```
 
 ---

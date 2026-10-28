@@ -107,6 +107,15 @@ from .priority_discovery import (
     display_discovery_results_summary,
     run_animated_priority_discovery,
 )
+from .discovery_wizard import (
+    build_default_recovery_destination,
+    confirm_acquisition,
+    display_discovery_summary,
+    discovery_summary_workflow,
+    prompt_recovery_destination,
+    scan_and_recovery_wizard_menu,
+    validate_destination_path,
+)
 
 logger = logging.getLogger("wrs.cli")
 
@@ -901,7 +910,20 @@ def run_interactive_workflow(
             display_scan_completed_summary(dev, effective_scan, dest_tree["reports"])
             continue
 
-        # 6. Explicit Acquisition Confirmation
+        # 6. Explicit Destination Prompt & Acquisition Confirmation
+        if acquire_mode and not unattended and override_output is None:
+            prompted_dest = prompt_recovery_destination(
+                device=dev,
+                total_files=preview.total_files,
+                total_bytes=preview.total_bytes,
+                settings=cfg,
+                source_paths=[loc.path for loc in selected_locs],
+            )
+            if not prompted_dest:
+                print("[*] Acquisition cancelled by user. No files were copied.")
+                return
+            preview.destination_path = prompted_dest
+
         confirmed = unattended
         if not confirmed:
             confirmed = ask_acquisition_confirmation(preview, preview.destination_path, device_name=dev.display_name)
@@ -1532,8 +1554,18 @@ def recovery_wizard_flow(
     settings: dict[str, Any],
     active_categories: List[str],
     discovery_manifest: Optional[DiscoveryManifest] = None,
-) -> None:
-    """Recovery Operation Selection (Phase 4, Option [1])."""
+    legacy_mode: bool = False,
+) -> Optional[DiscoveryManifest]:
+    """Recovery Wizard flow (Option [1] from Main Menu)."""
+    if not legacy_mode:
+        return scan_and_recovery_wizard_menu(
+            executor=executor,
+            selected_dev=selected_dev,
+            settings=settings,
+            active_categories=active_categories,
+            discovery_manifest=discovery_manifest,
+        )
+
     dev_name = selected_dev.display_name if selected_dev else "NONE DETECTED"
     cats_str = ", ".join(active_categories) if active_categories else "All Supported Data"
 
@@ -2952,14 +2984,16 @@ def interactive_menu() -> None:
     all_devs, selected_dev = detect_and_display_startup_devices(executor, settings)
 
     if not all_devs:
-        print("[*] No active Android device connected. Continuing with offline local recovery discovery")
-        print("    and previously acquired WRS data.\n")
+        print("[*] No active Android device connected. Operating in offline inspection & local recovery mode.\n")
 
-    # 2. Priority-Based Discovery Workflow (Priorities 1 to 5) with Loading Animation
-    discovery_manifest = run_animated_priority_discovery(executor, selected_dev, settings)
+    # 2. Check previous scans (load without scanning phone storage)
+    rec_root = settings.get("acquisition", {}).get("default_recovery_dir", "recovery")
+    discovery_manifest = DiscoveryManifest.load_latest(rec_root)
+    if discovery_manifest:
+        discovery_manifest.revalidate_candidates()
 
-    # 3. Discovery Results Review Menu
-    discovery_manifest = discovery_review_menu_interactive(discovery_manifest, executor, selected_dev, settings)
+    print("[INFO] Startup checks completed.")
+    print("[INFO] No storage scan has been started.\n")
 
     while True:
         # Runtime device & status check
@@ -3037,7 +3071,13 @@ def interactive_menu() -> None:
             choice = input("Select an option: ").strip()
 
             if choice == "1":
-                recovery_wizard_flow(executor, selected_dev, settings, active_categories, discovery_manifest=discovery_manifest)
+                discovery_manifest = scan_and_recovery_wizard_menu(
+                    executor=executor,
+                    selected_dev=selected_dev,
+                    settings=settings,
+                    active_categories=active_categories,
+                    discovery_manifest=discovery_manifest,
+                )
 
             elif choice == "2":
                 active_categories = category_selection_interactive(active_categories)
@@ -3071,11 +3111,10 @@ def interactive_menu() -> None:
                 sys.exit(0)
 
             elif choice == "refresh" or choice.lower() == "r":
-                print("\n[*] Refreshing connected Android devices and rerunning priority discovery...")
+                print("\n[*] Refreshing connected Android devices...")
                 executor.clear_cache()
                 all_devs, selected_dev = detect_and_display_startup_devices(executor, settings)
-                discovery_manifest = run_animated_priority_discovery(executor, selected_dev, settings)
-                discovery_manifest = discovery_review_menu_interactive(discovery_manifest, executor, selected_dev, settings)
+                print("[INFO] Device detection refreshed. No storage scan has been started.\n")
 
             else:
                 print("Invalid choice. Please select an option between 0 and 10.")

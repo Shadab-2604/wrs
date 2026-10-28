@@ -132,6 +132,24 @@ class DiscoveryManifest:
     summary_counts: Dict[str, int] = field(default_factory=dict)
     manifest_file: Optional[str] = None
 
+    @property
+    def total_files(self) -> int:
+        loc_sum = sum(loc.file_count for loc in self.locations if loc.file_count > 0)
+        if loc_sum > 0:
+            return loc_sum
+        return len(self.candidates)
+
+    @property
+    def total_bytes(self) -> int:
+        loc_bytes = sum(loc.total_bytes for loc in self.locations if loc.total_bytes > 0)
+        if loc_bytes > 0:
+            return loc_bytes
+        return sum(c.size_bytes for c in self.candidates if c.size_bytes > 0)
+
+    @property
+    def total_size_human(self) -> str:
+        return format_bytes(self.total_bytes)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "session_id": self.session_id,

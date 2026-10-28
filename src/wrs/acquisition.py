@@ -92,6 +92,37 @@ class AcquisitionPreview:
 AcquisitionProgressCb = Callable[[int, int, int, int, str, str, float], None]
 
 
+def build_default_recovery_destination(
+    base_recovery_dir: Path | str,
+    device: Optional[DeviceInfo] = None,
+    timestamp: Optional[datetime] = None,
+) -> Path:
+    """Build standard nested recovery destination: <base_recovery_dir>/<clean_dev>/scan_YYYY-MM-DD_HH-MM-SS/.
+
+    Uses actual sanitized device name, or 'local_import' if no device connected.
+    Prevents path collision by generating a unique suffix if the directory already exists.
+    """
+    base = Path(base_recovery_dir).resolve()
+    if device is not None:
+        clean_dev = sanitize_device_name(device.display_name)
+        if clean_dev in ("", "unknown_device", "Device"):
+            suffix = device.serial[-6:] if len(device.serial) > 6 else (device.serial or "dev")
+            clean_dev = f"Android_Device_{sanitize_device_name(suffix)}"
+    else:
+        clean_dev = "local_import"
+
+    slug = get_timestamp_slug(timestamp)
+    dev_dir = base / clean_dev
+    candidate_path = dev_dir / f"scan_{slug}"
+
+    counter = 1
+    while candidate_path.exists():
+        candidate_path = dev_dir / f"scan_{slug}_{counter}"
+        counter += 1
+
+    return candidate_path
+
+
 class AcquisitionManager:
     """Manages the forensic acquisition lifecycle."""
 
@@ -194,8 +225,16 @@ class AcquisitionManager:
             excluded_duplicates_bytes=excluded_dup_b,
         )
 
-    def _build_scan_dir_path(self, device: DeviceInfo, timestamp: Optional[datetime] = None) -> Path:
+
+    def _build_scan_dir_path(
+        self,
+        device: DeviceInfo,
+        timestamp: Optional[datetime] = None,
+        nested: bool = False,
+    ) -> Path:
         """Create standard directory path: recovery/DEVICE_NAME_scan_YYYY-MM-DD_HH-MM-SS/."""
+        if nested:
+            return build_default_recovery_destination(self.base_recovery_dir, device, timestamp)
         clean_dev = sanitize_device_name(device.display_name)
         if clean_dev in ("", "unknown_device", "Device"):
             suffix = device.serial[-6:] if len(device.serial) > 6 else (device.serial or "dev")
@@ -218,6 +257,14 @@ class AcquisitionManager:
             "root": destination_dir,
             "metadata": destination_dir / "metadata",
             "reports": destination_dir / "reports",
+            "manifests": destination_dir / "manifests",
+            "logs": destination_dir / "logs",
+            "chat_exports": destination_dir / "chat_exports",
+            "images": destination_dir / "images",
+            "videos": destination_dir / "videos",
+            "audio": destination_dir / "audio",
+            "documents": destination_dir / "documents",
+            "databases": destination_dir / "databases",
         }
 
         # Create category directories
