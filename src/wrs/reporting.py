@@ -42,11 +42,17 @@ class ReportGenerator:
         scan_result: ScanResult,
         records: Optional[List[VerificationRecord]] = None,
         output_dir: Optional[Path] = None,
+        conversations: Optional[List[Any]] = None,
+        database_metadata: Optional[List[Any]] = None,
+        duplicate_groups: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.device = device
         self.scan_result = scan_result
         self.records = records or []
         self.output_dir = output_dir or Path(".")
+        self.conversations = conversations or []
+        self.database_metadata = database_metadata or []
+        self.duplicate_groups = duplicate_groups or {}
 
         # Index verification records by source path for rapid lookup
         self.records_by_source: Dict[str, VerificationRecord] = {
@@ -156,6 +162,28 @@ class ReportGenerator:
                 "total_acquired": len(self.records),
                 "status_breakdown": status_counts,
             },
+            "database_analysis": [
+                asdict(d) if hasattr(d, "__dataclass_fields__") else d
+                for d in self.database_metadata
+            ],
+            "reconstructed_conversations": [
+                {
+                    "conversation_id": getattr(c, "conversation_id", ""),
+                    "display_name": getattr(c, "display_name", ""),
+                    "message_count": getattr(c, "message_count", 0),
+                    "start_time": getattr(c, "start_time", None),
+                    "end_time": getattr(c, "end_time", None),
+                    "media_count": getattr(c, "media_count", 0),
+                    "completeness_summary": getattr(c, "completeness_summary", ""),
+                }
+                for c in self.conversations
+            ],
+            "duplicate_summary": {
+                "groups_count": len(self.duplicate_groups),
+                "total_duplicates": sum(
+                    len(getattr(g, "duplicate_paths", [])) for g in self.duplicate_groups.values()
+                ),
+            },
             "files": file_entries,
             "forensic_limitations": {
                 "private_storage_restriction": (
@@ -242,6 +270,57 @@ class ReportGenerator:
             </tr>
             """)
         db_table_body = "".join(db_rows) if db_rows else "<tr><td colspan='5'>No database or backup candidates found.</td></tr>"
+
+        # Build Reconstructed Conversations section if available
+        conv_section = ""
+        if self.conversations:
+            conv_rows = []
+            for c in self.conversations:
+                conv_rows.append(f"""
+                <tr>
+                    <td><strong>{html.escape(getattr(c, 'display_name', ''))}</strong></td>
+                    <td class="num">{getattr(c, 'message_count', 0)}</td>
+                    <td class="num">{getattr(c, 'media_count', 0)}</td>
+                    <td><small>{html.escape(str(getattr(c, 'start_time', 'N/A')))} — {html.escape(str(getattr(c, 'end_time', 'N/A')))}</small></td>
+                </tr>
+                """)
+            conv_section = f"""
+            <h2>Reconstructed Conversations ({len(self.conversations)})</h2>
+            <table>
+                <thead>
+                    <tr><th>Conversation</th><th class="num">Messages</th><th class="num">Media</th><th>Timespan</th></tr>
+                </thead>
+                <tbody>
+                    {''.join(conv_rows)}
+                </tbody>
+            </table>
+            """
+
+        # Build Duplicate Summary section if available
+        dup_section = ""
+        if self.duplicate_groups:
+            dup_rows = []
+            for gid, g in list(self.duplicate_groups.items())[:50]:
+                dup_rows.append(f"""
+                <tr>
+                    <td><code>{html.escape(gid)}</code></td>
+                    <td class="num">{getattr(g, 'total_count', 0)}</td>
+                    <td class="num">{html.escape(format_bytes(getattr(g, 'size_bytes', 0)))}</td>
+                    <td><small>{html.escape(getattr(g, 'primary_path', ''))}</small></td>
+                </tr>
+                """)
+            dup_section = f"""
+            <h2>Identified Duplicate Asset Groups ({len(self.duplicate_groups)})</h2>
+            <div class="notice"><p>Verified identical files identified via size-bucketed SHA-256 matching. These can be excluded from redundant acquisition upon request.</p></div>
+            <table>
+                <thead>
+                    <tr><th>Group ID</th><th class="num">Copies</th><th class="num">Size Each</th><th>Primary Asset</th></tr>
+                </thead>
+                <tbody>
+                    {''.join(dup_rows)}
+                </tbody>
+            </table>
+            """
 
         html_content = f"""<!DOCTYPE html>
 <html lang="en">
@@ -429,6 +508,10 @@ class ReportGenerator:
             </tfoot>
         </table>
 
+        {conv_section}
+
+        {dup_section}
+
         <h2>Database & Backup Candidates</h2>
         <div class="notice">
             <p><strong>Database Preservation Note:</strong> Databases are preserved byte-for-byte in their raw format.
@@ -459,7 +542,9 @@ class ReportGenerator:
 
             <h4>2. Data Distinction</h4>
             <p>Files listed as <strong>Discovered</strong> exist on the filesystem. Files listed as <strong>Acquired</strong> have been copied to the local recovery repository.
-            Files marked <strong>VERIFIED</strong> have matching source and destination SHA-256 hashes. Deleted chats purged prior to backup creation are not restored by file copying.</p>
+            Files marked <strong>VERIFIED</strong> have matching source and destination SHA-256 hashes. 
+            Files marked <strong>Reconstructed</strong> reflect readable plaintext message records extracted into conversation threads.
+            Deleted chats purged prior to backup creation are not restored by file copying.</p>
         </div>
 
         <div class="footer">

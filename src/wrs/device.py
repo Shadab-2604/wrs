@@ -7,8 +7,10 @@ and root indicator status.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+from pathlib import Path
 import re
 import shutil
 import subprocess
@@ -18,12 +20,47 @@ from typing import Callable, List, Optional, Tuple
 logger = logging.getLogger("wrs.device")
 
 
+def get_device_salt() -> bytes:
+    """Load or generate a local persistent 32-byte salt for non-secret device identifier hashing."""
+    salt_dir = Path(__file__).resolve().parent.parent.parent / "config"
+    salt_file = salt_dir / "device_salt.bin"
+    if salt_file.exists():
+        try:
+            val = salt_file.read_bytes()
+            if len(val) >= 16:
+                return val
+        except OSError:
+            pass
+    salt_dir.mkdir(parents=True, exist_ok=True)
+    new_salt = os.urandom(32)
+    try:
+        salt_file.write_bytes(new_salt)
+    except OSError:
+        pass
+    return new_salt
+
+
+def generate_device_identifier(
+    manufacturer: str, model: str, serial: str, salt: Optional[bytes] = None
+) -> str:
+    """Create a stable internal device identifier using non-secret metadata and local salt.
+
+    Never hashes or stores sensitive user identifiers like IMEI or phone numbers.
+    """
+    if not serial:
+        return "dev_unknown"
+    s = salt if salt is not None else get_device_salt()
+    token = f"{s.hex()}:{manufacturer.strip().lower()}:{model.strip().lower()}:{serial.strip()}".encode("utf-8")
+    return f"dev_{hashlib.sha256(token).hexdigest()[:16]}"
+
+
 @dataclass
 class DeviceInfo:
     """Comprehensive details of an Android device inspected via ADB."""
 
     serial: str
     state: str  # 'device', 'unauthorized', 'offline', 'unavailable', etc.
+    device_id: str = ""
     manufacturer: str = "Unknown"
     model: str = "Unknown"
     android_version: str = "Unknown"
@@ -252,7 +289,15 @@ class AdbExecutor:
         # Note: Do not treat failed root check as proof of non-root.
         dev.root_status = self._check_root_status(serial)
 
+        # 5. Stable non-secret device identifier
+        dev.device_id = generate_device_identifier(dev.manufacturer, dev.model, dev.serial)
+
         return dev
+
+    def is_device_connected(self, serial: str) -> bool:
+        """Verify whether the device remains attached and responsive."""
+        res = self.run_cmd(["get-state"], serial=serial, timeout=5)
+        return res.returncode == 0 and "device" in res.stdout
 
     def _parse_getprop(self, output: str) -> dict[str, str]:
         """Parse getprop bracketed format: [key]: [value]."""

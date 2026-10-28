@@ -48,6 +48,20 @@ from .utils import (
 logger = logging.getLogger("wrs.acquisition")
 
 
+from .case import CaseManager, generate_scan_id
+from .duplicate import DuplicateDetector, DuplicateGroup
+from .inventory import (
+    InventoryRecord,
+    ScanInventoryDB,
+    STATUS_ACQUIRED,
+    STATUS_ACQUISITION_ELIGIBLE,
+    STATUS_DISCOVERED,
+    STATUS_FAILED as INV_FAILED,
+    STATUS_UNREADABLE,
+    STATUS_VERIFIED as INV_VERIFIED,
+)
+
+
 @dataclass
 class AcquisitionPreview:
     """Pre-acquisition summary displaying file counts, sizes, and requirements."""
@@ -69,6 +83,10 @@ class AcquisitionPreview:
     available_space: int
     has_sufficient_space: bool
     space_message: str
+    scan_id: str = ""
+    duplicate_candidates: int = 0
+    excluded_duplicates_count: int = 0
+    excluded_duplicates_bytes: int = 0
 
 
 AcquisitionProgressCb = Callable[[int, int, int, int, str, str, float], None]
@@ -95,13 +113,35 @@ class AcquisitionManager:
         scan_result: ScanResult,
         selected_categories: Optional[Set[str]] = None,
         custom_destination: Optional[Path] = None,
+        excluded_paths: Optional[Set[str]] = None,
+        scan_id: Optional[str] = None,
     ) -> AcquisitionPreview:
         """Calculate and format an accurate pre-acquisition preview."""
         dest_dir = custom_destination or self._build_scan_dir_path(device)
+        sid = scan_id or generate_scan_id(device.serial)
+
+        # Detect duplicate size collisions as potential duplicate candidates
+        size_counts: Dict[int, int] = {}
+        for f in scan_result.files:
+            if f.size_bytes > 0:
+                size_counts[f.size_bytes] = size_counts.get(f.size_bytes, 0) + 1
+        dup_candidate_count = sum(c for sz, c in size_counts.items() if c > 1)
 
         filtered_files = scan_result.files
         if selected_categories is not None:
             filtered_files = [f for f in filtered_files if f.category in selected_categories]
+
+        excluded_dup_cnt = 0
+        excluded_dup_b = 0
+        if excluded_paths:
+            final_files = []
+            for f in filtered_files:
+                if f.original_path in excluded_paths:
+                    excluded_dup_cnt += 1
+                    excluded_dup_b += f.size_bytes
+                else:
+                    final_files.append(f)
+            filtered_files = final_files
 
         cat_counts: Dict[str, int] = {c: 0 for c in ALL_CATEGORIES}
         cat_bytes: Dict[str, int] = {c: 0 for c in ALL_CATEGORIES}
@@ -148,6 +188,10 @@ class AcquisitionManager:
             available_space=free_b,
             has_sufficient_space=has_space,
             space_message=space_msg,
+            scan_id=sid,
+            duplicate_candidates=dup_candidate_count,
+            excluded_duplicates_count=excluded_dup_cnt,
+            excluded_duplicates_bytes=excluded_dup_b,
         )
 
     def _build_scan_dir_path(self, device: DeviceInfo, timestamp: Optional[datetime] = None) -> Path:
@@ -189,9 +233,43 @@ class AcquisitionManager:
         destination_dir: Path,
         selected_categories: Optional[Set[str]] = None,
         progress_cb: Optional[AcquisitionProgressCb] = None,
+        excluded_paths: Optional[Set[str]] = None,
+        scan_id: Optional[str] = None,
     ) -> List[VerificationRecord]:
         """Acquire files safely via ADB into structured categories with SHA-256 verification."""
         dir_tree = self.setup_recovery_tree(destination_dir)
+        sid = scan_id or generate_scan_id(device.serial)
+        case_mgr = CaseManager(destination_dir)
+        case_mgr.log_event(sid, "ACQUISITION_INITIALIZED", {
+            "device": device.display_name,
+            "serial": device.serial,
+            "total_files": scan_result.total_files,
+            "total_bytes": scan_result.total_bytes,
+        })
+
+        # Initialize SQLite scan inventory database
+        inv_db_path = dir_tree["metadata"] / "inventory.db"
+        inv_db = ScanInventoryDB(inv_db_path)
+        init_records = [
+            InventoryRecord(
+                scan_id=sid,
+                device_id=device.device_id or device.serial,
+                source_path=f.original_path,
+                relative_path=f.relative_path,
+                filename=f.filename,
+                extension=f.extension,
+                category=f.category,
+                size_bytes=f.size_bytes,
+                modified_time=f.modified_time,
+                readability=f.readability,
+                acquisition_status=STATUS_ACQUISITION_ELIGIBLE if (
+                    (selected_categories is None or f.category in selected_categories)
+                    and (not excluded_paths or f.original_path not in excluded_paths)
+                ) else STATUS_DISCOVERED,
+            )
+            for f in scan_result.files
+        ]
+        inv_db.insert_batch(init_records)
 
         # Write initial device metadata
         dev_meta_path = dir_tree["metadata"] / "device.json"
@@ -202,6 +280,7 @@ class AcquisitionManager:
         scan_meta_path = dir_tree["metadata"] / "scan_summary.json"
         with open(scan_meta_path, "w", encoding="utf-8") as f:
             summary_dict = {
+                "scan_id": sid,
                 "serial": scan_result.device_serial,
                 "location": scan_result.location_path,
                 "start_time": scan_result.start_time,
@@ -217,7 +296,8 @@ class AcquisitionManager:
         # Filter target files
         target_files = [
             f for f in scan_result.files
-            if selected_categories is None or f.category in selected_categories
+            if (selected_categories is None or f.category in selected_categories)
+            and (not excluded_paths or f.original_path not in excluded_paths)
         ]
 
         total_files = len(target_files)
@@ -318,8 +398,15 @@ class AcquisitionManager:
                 records.append(rec)
                 transferred_bytes += acquired_sz
 
-                # 7. Update manifest incrementally to preserve state
+                # 7. Update manifest and persistent inventory incrementally
                 self._write_manifest(manifest_path, records)
+                inv_db.update_acquisition_status(
+                    source_path=sfile.original_path,
+                    status=rec.status,
+                    destination_sha256=rec.destination_sha256,
+                    verification_status=rec.status,
+                    error_message=rec.error_message,
+                )
 
                 # 8. Report progress
                 if progress_cb:
@@ -335,10 +422,15 @@ class AcquisitionManager:
 
         except KeyboardInterrupt:
             logger.warning("Acquisition interrupted by user. Saving state...")
+            case_mgr.log_event(sid, "ACQUISITION_INTERRUPTED", {
+                "files_completed": len(records),
+                "files_total": total_files,
+            })
             # Save interruption record
             interrupted_path = dir_tree["metadata"] / "interrupted.json"
             with open(interrupted_path, "w", encoding="utf-8") as f:
                 json.dump({
+                    "scan_id": sid,
                     "interrupted_at": format_timestamp(),
                     "files_completed": len(records),
                     "files_total": total_files,
@@ -351,6 +443,10 @@ class AcquisitionManager:
             err_path = dir_tree["metadata"] / "errors.json"
             with open(err_path, "w", encoding="utf-8") as f:
                 json.dump(errors_log, f, indent=2)
+            case_mgr.log_event(sid, "ACQUISITION_FINISHED", {
+                "total_acquired": len(records),
+                "total_errors": len(errors_log),
+            })
 
         return records
 

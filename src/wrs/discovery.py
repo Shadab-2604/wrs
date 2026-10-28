@@ -32,9 +32,15 @@ class DiscoveredLocation:
     path: str
     canonical_path: str
     app_type: str  # 'WhatsApp Standard', 'WhatsApp Business', 'Unknown'
+    parent_root: str = ""
     exists: bool = False
     is_readable: bool = False
     is_removable: bool = False
+    subdirectories: List[str] = field(default_factory=list)
+    file_count: int = 0
+    logical_size: int = 0
+    categories_found: List[str] = field(default_factory=list)
+    scan_duration: float = 0.0
     aliases: List[str] = field(default_factory=list)
     error_message: Optional[str] = None
 
@@ -44,7 +50,8 @@ class DiscoveredLocation:
         type_str = f"[{self.app_type}]"
         removable_str = " (Removable SD)" if self.is_removable else ""
         readable_str = "Readable" if self.is_readable else "Access Restricted"
-        return f"{self.path} {type_str}{removable_str} — {readable_str}"
+        subs = f" ({len(self.subdirectories)} subdirs)" if self.subdirectories else ""
+        return f"{self.path} {type_str}{removable_str} — {readable_str}{subs}"
 
 
 class StorageDiscovery:
@@ -131,23 +138,39 @@ class StorageDiscovery:
             if resolved and resolved.startswith("/"):
                 canonical = resolved.rstrip("/") + "/"
 
+        # Determine parent root
+        p_clean = path.rstrip("/")
+        parent_root = p_clean.rsplit("/", 1)[0] if "/" in p_clean else p_clean
+
         # Test readability by listing directory contents
         read_chk = self.executor.run_cmd(
-            ["shell", "ls", "-d", f'"{path}"/*'],
+            ["shell", "ls", "-d", f'"{path}"*'],
             serial=serial,
             timeout=10,
         )
         is_readable = read_chk.returncode == 0
         error_msg = None
+        subdirs: List[str] = []
         if not is_readable:
             error_msg = read_chk.stderr.strip() or "Permission denied or directory unreadable"
+        else:
+            # Check for standard subfolders
+            sub_chk = self.executor.run_cmd(
+                ["shell", f'ls -F "{path}" 2>/dev/null | grep "/"'],
+                serial=serial,
+                timeout=5,
+            )
+            if sub_chk.returncode == 0 and sub_chk.stdout:
+                subdirs = [s.strip().rstrip("/") for s in sub_chk.stdout.splitlines() if s.strip()]
 
         return DiscoveredLocation(
             path=path,
             canonical_path=canonical,
             app_type=app_type,
+            parent_root=parent_root,
             exists=True,
             is_readable=is_readable,
             is_removable=is_removable,
+            subdirectories=subdirs,
             error_message=error_msg,
         )

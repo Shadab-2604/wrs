@@ -1,100 +1,161 @@
-# WRS — WhatsApp Recovery Scanner
+# WRS — WhatsApp Recovery Scanner (v2.0.0)
+## Advanced WhatsApp Forensic Acquisition, Backup Analysis & Recovery Workstation
 
-A local-first, forensic-grade acquisition and recovery-assistance utility engineered for Android devices via Android Debug Bridge (ADB).
+A local-first, forensic-grade acquisition, database analysis, chat reconstruction, and recovery workstation engineered for Android devices via Android Debug Bridge (ADB) on Kali Linux.
 
 ---
 
-## 1. Overview & Capabilities
+## 1. Overview & Forensic Architecture
 
-**WRS (WhatsApp Recovery Scanner)** is designed for digital forensics specialists, security researchers, and device owners who need to safely identify, inventory, validate, hash, and acquire WhatsApp data from an Android device without risking modification to the target phone.
+**WRS (WhatsApp Recovery Scanner)** is designed for digital forensics examiners, incident responders, and privacy researchers who need to safely discover, inventory, hash, acquire, analyze, and reconstruct WhatsApp communications from Android devices without modifying or risking evidence on the target phone.
+
+```
+                      +-----------------------------+
+                      |   Target Android Device     |
+                      |  (Standard / Business WA)   |
+                      +--------------+--------------+
+                                     |  (Read-only ADB)
+                                     v
+                       +---------------------------+
+                       |    Device & Storage       |
+                       |       Discovery           |
+                       +-------------+-------------+
+                                     |
+                                     v
+                       +---------------------------+
+                       |   SQLite Persistent Scan  |
+                       |     Inventory Catalog     |
+                       +-------------+-------------+
+                                     |
+                                     v
+                       +---------------------------+
+                       | Pre-Acquisition Preview   |
+                       |  & Scope Recalculation    |
+                       +-------------+-------------+
+                                     |
+                                     v
+                       +---------------------------+
+                       | Explicit Confirmation     |
+                       |  & Forensic Acquisition   |
+                       +-------------+-------------+
+                                     |
+           +-------------------------+-------------------------+
+           |                                                   |
+           v                                                   v
++----------------------+                            +----------------------+
+|  Database Analysis   |                            |   Media Validation   |
+|  & AES-GCM Decrypt   |                            |   & Association      |
++----------+-----------+                            +----------+-----------+
+           |                                                   |
+           +-------------------------+-------------------------+
+                                     |
+                                     v
+                       +---------------------------+
+                       |    Chat Reconstruction    |
+                       |          Engine           |
+                       +-------------+-------------+
+                                     |
+           +-------------------------+-------------------------+
+           |                                                   |
+           v                                                   v
++----------------------+                            +----------------------+
+| Multi-Format Exports |                            | Case Audit Logging   |
+| (TXT/HTML/JSON/CSV)  |                            | & Verified ZIP Pkg   |
++----------------------+                            +----------------------+
+```
 
 ### Key Capabilities
-- **100% Local Execution**: Zero cloud APIs, telemetry, external network requests, or third-party tracking. All processing occurs locally on Kali Linux.
-- **Two-Stage Acquisition Protocol**:
-  1. *Discovery & Pre-Acquisition Inventory*: Recursively scans accessible shared storage and presents total file counts, sizes by category, and disk space assessments.
-  2. *Explicit User Confirmation*: Files are never pulled without mandatory affirmative confirmation (`[y/N]`, defaulting to No).
-- **Strict Forensic Safety**:
-  - Never deletes, modifies, renames, or overwrites source files on the Android device.
-  - Never executes write operations or root exploits on the device.
-  - Read-only SQLite database inspection with `PRAGMA integrity_check`.
-  - Non-destructive acquisition into structured directories.
-- **Dual SHA-256 Verification**:
-  - Computes destination file hash locally via memory-bounded streaming chunks.
-  - Queries independent device-side SHA-256 via ADB when supported.
-  - Strictly distinguishes verified files (`VERIFIED`) from cases where the source hash was unavailable on-device (`SOURCE_HASH_UNAVAILABLE`).
-- **Comprehensive Forensic Reporting**:
-  - Produces standalone **HTML**, **CSV**, and **JSON** reports with full metadata, verification statuses, and sanitized paths.
-  - Standalone verification command to re-audit existing recovery archives against the original manifest.
-- **Interrupted Transfer Resumption**:
-  - Safe state persistence via incremental manifest updates.
-  - Resumes without re-copying or overwriting already verified files.
+
+1. **100% Local Execution**: Zero cloud APIs, telemetry, external network requests, or third-party processing.
+2. **Two-Stage Acquisition Protocol**:
+   - *Discovery & Inventory*: Recursively scans accessible WhatsApp storage and builds a persistent SQLite inventory.
+   - *Interactive Scope Planning*: Recalculate file counts, sizes, and disk assessments dynamically when selecting categories or excluding duplicate candidates.
+   - *Explicit Confirmation*: Files are never pulled without mandatory affirmative confirmation (`[y/N]`, defaulting to No).
+3. **Forensic Device Management**:
+   - Secure internal device identifier generated from non-secret hardware properties with local salting.
+   - Disconnection detection and safe interrupt handling.
+4. **Staged Duplicate Content Detection**:
+   - Groups files by exact byte size.
+   - Eliminates unique sizes and evaluates SHA-256 digests on candidate collisions.
+   - Allows excluding redundant duplicate copies while preserving the primary reference.
+5. **Modular Database & Backup Inspection**:
+   - Read-only SQLite inspection (`PRAGMA integrity_check`, table catalogs).
+   - Schema-aware adapters for both classic (`messages`) and modern (`message` / `chat` / `jid`) WhatsApp databases.
+   - Crypt14 and Crypt15 detection with user-supplied AES-GCM-256 decryption adapter.
+6. **Chat Reconstruction Engine**:
+   - Normalizes raw database records into a structured forensic message model (`ReconstructedMessage`).
+   - Chronological message sorting, participant resolution, quoted replies, and reaction tracking.
+7. **Forensic Media Association**:
+   - Correlates message attachments against acquired media using strict evidence levels:
+     - `EXACT_DATABASE_REFERENCE`
+     - `MATCHED_RELATIVE_PATH`
+     - `MATCHED_FILENAME`
+     - `UNMATCHED`
+8. **Multi-Format Export & ZIP Packaging**:
+   - Exports conversation transcripts to **TXT**, **HTML** (with speech bubbles and forensic metadata), **JSON**, and **CSV**.
+   - Standard-library `zipfile` packaging with pre-packaging disk check, internal `archive_manifest.json`, `testzip()` integrity verification, and archive SHA-256 hashing.
+9. **Case Management & Audit Trail**:
+   - Append-only event logging (`case_events.jsonl`) with automatic redaction of sensitive credentials and keys.
+   - Historical case comparison detecting identical, newly acquired, deleted, or modified assets across scans.
 
 ---
 
 ## 2. System Requirements
 
-- **Operating System**: Kali Linux 2023+ (or standard Debian/Ubuntu derivatives).
-- **Python**: Python 3.11 or later (tested on Python 3.14).
+- **Workstation OS**: Kali Linux 2023+ (or standard Debian / Ubuntu derivatives).
+- **Python Runtime**: Python 3.11 or later (tested and validated on Python 3.14).
 - **Android Debug Bridge (ADB)**: Android SDK Platform-Tools 1.0.41+.
-- **Disk Space**: Sufficient local storage at the destination path for target files plus a 10% safety margin (minimum 100 MiB free space safety buffer).
+- **Workstation Storage**: Sufficient free disk space at destination plus a 10% safety margin (minimum 100 MiB free space buffer).
 
 ---
 
 ## 3. Installation on Kali Linux
 
-### Step 1: Update Packages and Install ADB
-On Kali Linux, ADB is available via the `adb` package:
+### Step 1: Install System Dependencies
 ```bash
 sudo apt update
 sudo apt install -y adb python3 python3-pip
 ```
 
-Verify that ADB is operational:
+Verify ADB installation:
 ```bash
 adb version
 ```
 
-### Step 2: Clone or Download the Repository
+### Step 2: Clone the Repository
 ```bash
 git clone https://github.com/your-repo/wrs.git
 cd wrs
 ```
 
-### Step 3: Install Optional Dependencies (Recommended)
-Core functionality runs using Python's standard library alone. Optional libraries enhance terminal tables and file signature sniffing:
+### Step 3: Install Python Dependencies
 ```bash
 pip install -r requirements.txt --break-system-packages
 ```
-*(Alternatively, use a Python virtual environment: `python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt`)*
+*(Dependencies are strictly minimal: `cryptography`, `rich`, `python-magic`, and `pytest`.)*
 
 ---
 
-## 4. Android Device Preparation
+## 4. Android Device Setup
 
-### 1. Enable Developer Options
-1. On the Android device, navigate to **Settings** > **About Phone**.
-2. Tap **Build Number** 7 times until you see the prompt *"You are now a developer!"*.
-
-### 2. Enable USB Debugging
-1. Navigate to **Settings** > **System** > **Developer Options** (or **Additional Settings**).
-2. Toggle **USB Debugging** to **ON**.
-3. Connect the phone to your Kali Linux workstation via a USB data cable (ensure the cable supports data transfer, not charge-only).
-
-### 3. Authorize the Workstation
-1. Unlock the phone screen.
-2. When the pop-up appears asking **"Allow USB debugging?"**, check **"Always allow from this computer"** and tap **Allow** / **OK**.
-3. Verify connection in your Kali terminal:
+1. **Enable Developer Options**: Go to **Settings** > **About Phone** and tap **Build Number** 7 times.
+2. **Enable USB Debugging**: In **Settings** > **System** > **Developer Options**, enable **USB Debugging**.
+3. **Authorize Workstation**:
+   - Connect the phone to Kali Linux via a USB data cable.
+   - Unlock the phone screen.
+   - On the "Allow USB debugging?" pop-up, check **"Always allow from this computer"** and tap **Allow** / **OK**.
+4. **Confirm Device Connectivity**:
    ```bash
    adb devices -l
    ```
-   *Expected status:* `device` (if listed as `unauthorized`, unlock the screen and accept the prompt).
+   *Status must be `device` (not `unauthorized` or `offline`).*
 
 ---
 
-## 5. Usage & Workflow
+## 5. Usage & Commands
 
 ### Interactive Menu Mode
-Launch the interactive terminal interface:
+Launch the comprehensive terminal workstation:
 ```bash
 python3 wrs.py
 ```
@@ -103,61 +164,82 @@ The menu provides:
 ```text
 [1] Scan Android device and discover WhatsApp data (Inventory Only)
 [2] Scan and acquire WhatsApp data
-[3] Inspect an existing recovery folder
+[3] Inspect recovery folder or SQLite database
 [4] Verify acquired files and hashes
-[5] Generate or regenerate reports
-[6] View supported recovery locations and limitations
-[7] Exit
+[5] Reconstruct and export chats from acquired database
+[6] Package recovery directory into ZIP archive
+[7] View case audit log and past scans
+[8] View supported recovery locations and limitations
+[9] Exit
 ```
 
-### Automated / CLI Scripting Mode
-For headless or scripted execution:
+### Command-Line Scripting & Headless Automation
 
 - **List connected devices:**
   ```bash
   python3 wrs.py --list-devices
   ```
 
-- **Perform inventory scan only (no file copying):**
+- **Inventory scan without copying files:**
   ```bash
   python3 wrs.py --device SERIAL_NUMBER --scan
   ```
 
-- **Scan and acquire data to default recovery folder:**
+- **Scan and acquire with category filter:**
   ```bash
-  python3 wrs.py --device SERIAL_NUMBER --acquire
+  python3 wrs.py --device SERIAL_NUMBER --acquire --categories Images,Videos,Databases
   ```
 
-- **Specify custom output directory:**
+- **Acquire while automatically excluding duplicate copies:**
   ```bash
-  python3 wrs.py --device SERIAL_NUMBER --acquire --output /path/to/forensics/case_01
+  python3 wrs.py --device SERIAL_NUMBER --acquire --exclude-duplicates
   ```
 
-- **Verify integrity of an existing acquired directory:**
+- **Inspect an acquired database or recovery folder:**
   ```bash
-  python3 wrs.py --verify ./recovery/Pixel_7_scan_2026-10-28_10-00-00
+  python3 wrs.py --inspect ./recovery/Google_Pixel_7_scan_2026-10-28_10-00-00/Databases/msgstore.db
   ```
 
-- **Unattended / Headless acquisition (strict non-interactive):**
+- **Inspect and decrypt an encrypted database using user key:**
   ```bash
-  python3 wrs.py --device SERIAL_NUMBER --acquire --output ./recovery --unattended
+  python3 wrs.py --inspect ./recovery/.../msgstore.db.crypt14 --key ./whatsapp.key
+  ```
+
+- **Reconstruct and export chats from a database to HTML/JSON/CSV:**
+  ```bash
+  python3 wrs.py --export ./recovery/.../msgstore.db --format all
+  ```
+
+- **Package a recovery directory into a verified ZIP archive:**
+  ```bash
+  python3 wrs.py --export ./recovery/Google_Pixel_7_scan_2026-10-28_10-00-00 --format zip
+  ```
+
+- **Verify integrity of an existing recovery folder against its manifest:**
+  ```bash
+  python3 wrs.py --verify ./recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
+  ```
+
+- **Headless unattended acquisition (for forensic scripting):**
+  ```bash
+  python3 wrs.py --device SERIAL_NUMBER --acquire --output ./case_01 --unattended
   ```
 
 ---
 
-## 6. Pre-Acquisition Preview & Confirmation
+## 6. Pre-Acquisition Preview & Interactive Planning
 
-Before copying any data, WRS calculates a complete file inventory from the selected storage location and displays a detailed preview:
+Before pulling files, WRS calculates exact metrics and presents an interactive planning interface:
 
-*(Illustrative Example Output)*
 ```text
 ========================================================================
   WRS — ACQUISITION PREVIEW
 ========================================================================
+  Scan ID          : scan_28241FDH_20261028_100000_a1b2c3
   Device           : Google Pixel 7
   Serial           : 28241FDH2006G7
   Android Version  : 14 (API 34)
-  Scan Date        : 2026-10-28 09:30:45
+  Scan Date        : 2026-10-28 10:00:00
   Selected Location: /storage/emulated/0/Android/media/com.whatsapp/WhatsApp/
 ------------------------------------------------------------------------
   CATEGORY                  FILES        TOTAL SIZE
@@ -178,37 +260,34 @@ Before copying any data, WRS calculates a complete file inventory from the selec
   Unreadable Files       : 0
   Skipped Files          : 0
   Database/Backup Assets : 9
-  Destination Directory  : /home/bablu/TOOLS/wrs/recovery/Pixel_7_scan_2026-10-28_09-30-45
+  Duplicate Candidates   : 48 (18.20 MiB redundant)
+  Destination Directory  : /home/bablu/TOOLS/wrs/recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
   Storage Assessment     : Disk space OK: 148.50 GiB available. Required: 1.44 GiB + 147.45 MiB safety margin.
 ========================================================================
 
-The scanner is ready to copy the selected files to:
-  /home/bablu/TOOLS/wrs/recovery/Pixel_7_scan_2026-10-28_09-30-45
-
-No source files will be deleted or modified on the Android device.
-
-Proceed with acquisition? [y/N]: 
+Acquisition Selection Options:
+  [1] Proceed with current selection
+  [2] Select specific categories
+  [3] Exclude duplicate candidate files
+  [4] Export inventory catalog only
+  [5] Cancel
 ```
-
-**Safeguard Rules:**
-- The default option is **No**.
-- Only affirmative input (`y` or `yes`) initiates acquisition.
-- If storage space on the workstation is insufficient, WRS stops immediately before any transfer starts.
 
 ---
 
-## 7. Recovery Directory Structure
+## 7. Recovery Directory Layout
 
-Acquired files are organized into standard forensic directories:
+Each acquisition generates an isolated, collision-safe directory structure:
 
 ```text
 recovery/
-└── Pixel_7_scan_2026-10-28_09-30-45/
+└── Google_Pixel_7_scan_2026-10-28_10-00-00/
     ├── metadata/
-    │   ├── device.json
-    │   ├── scan_summary.json
-    │   ├── acquisition_manifest.json
-    │   └── errors.json
+    │   ├── device.json                     # Hardware and Android OS properties
+    │   ├── scan_inventory.db               # Persistent SQLite scan catalog with indexes
+    │   ├── acquisition_manifest.json       # Per-file SHA-256 verification manifest
+    │   ├── case_events.jsonl               # Append-only forensic audit trail
+    │   └── errors.json                     # Traversal and transfer error logs
     ├── Databases/
     │   ├── msgstore.db.crypt14
     │   └── wa.db
@@ -216,121 +295,105 @@ recovery/
     │   ├── msgstore-2026-10-25.1.db.crypt14
     │   └── msgstore-2026-10-26.1.db.crypt14
     ├── Images/
-    │   └── IMG-20261025-WA0001.jpg
     ├── Videos/
     ├── Audio/
     ├── Voice_Notes/
-    │   └── PTT-20261025-WA0002.opus
     ├── Documents/
     ├── Stickers/
     ├── Animated_GIFs/
     ├── Thumbnails/
     ├── Other/
+    ├── chats/                              # Reconstructed chat transcripts
+    │   ├── Alice_Smith.txt
+    │   ├── Alice_Smith.html
+    │   ├── Alice_Smith.json
+    │   └── Alice_Smith.csv
     └── reports/
-        ├── report.html
-        ├── report.csv
-        └── report.json
+        ├── report.html                     # Standalone visual HTML dashboard
+        ├── report.csv                      # RFC-4180 evidence inventory table
+        └── report.json                     # Machine-readable case report
 ```
 
 ---
 
-## 8. File Classification Rules
+## 8. Forensic File Classification & Integrity Codes
 
-Files are categorized into forensically distinct buckets:
+### Classification Categories
 
-| Category | Description & Qualification Rules |
+| Category | Qualification Criteria |
 | :--- | :--- |
 | **Databases** | Active WhatsApp SQLite databases (`msgstore.db`, `wa.db`, `chatsettingsbackup.db`) and active encrypted databases (`msgstore.db.crypt14`, `msgstore.db.crypt15`). |
-| **Backups** | Dated WhatsApp backup archives matching date patterns (e.g. `msgstore-YYYY-MM-DD.N.db.crypt14/15`). *Files are never categorized as backups solely because their name contains the word "backup".* |
-| **Images** | JPG, PNG, WebP, BMP, TIFF photos and media located in WhatsApp image directories. |
+| **Backups** | Dated backup archives matching pattern `msgstore-YYYY-MM-DD.N.db.crypt14/15`. Never classified as backup merely for having "backup" in the filename. |
+| **Images** | JPG, PNG, WebP, BMP, TIFF photos in WhatsApp image paths. |
 | **Videos** | MP4, 3GP, MOV, MKV, AVI video recordings. |
-| **Audio** | Music tracks and standard audio files in WhatsApp Audio folders. |
-| **Voice Notes** | Push-to-Talk (PTT) recordings and WhatsApp voice clips located in voice-note specific folders. *Categorized specifically as Voice Notes rather than generic audio.* |
-| **Documents** | PDF, DOC, DOCX, XLS, XLSX, PPT, TXT, and archive files. |
-| **Stickers** | Sticker assets located in WhatsApp Stickers directory (`.webp`). |
-| **Animated GIFs**| Looping animations and GIF/MP4 media from WhatsApp Animated Gifs folders. |
+| **Audio** | Music tracks and standard audio in WhatsApp Audio paths. |
+| **Voice Notes** | Push-to-Talk (PTT) recordings and WhatsApp Opus voice notes. |
+| **Documents** | PDF, DOC, DOCX, XLS, XLSX, PPT, TXT, and zip archives. |
+| **Stickers** | WebP sticker assets in WhatsApp Stickers directory. |
+| **Animated GIFs**| GIF/MP4 media from Animated Gifs folders. |
 | **Thumbnails** | Cached preview images and `.thumbs` files. |
 | **Other** | `.nomedia` files, application logs, configuration, and unclassified entries. |
 
----
-
-## 9. Forensic Integrity & Status Codes
-
-For every acquired file, WRS evaluates SHA-256 integrity and assigns a forensic status:
+### Integrity Verification Codes
 
 | Status Code | Meaning |
 | :--- | :--- |
-| `VERIFIED` | Both source hash (computed on device) and destination hash (computed locally) were obtained and match identically. |
-| `SOURCE_HASH_UNAVAILABLE` | Local file hash was successfully computed, but on-device hashing tool (`sha256sum`) was restricted or unavailable on the Android build. Integrity of local file is preserved. |
-| `SIZE_MISMATCH` | Local acquired byte size differs from the expected size reported on device. |
-| `HASH_MISMATCH` | Source and destination SHA-256 hashes differ. |
-| `PARTIAL` | Acquisition was interrupted before completion. |
+| `VERIFIED` | Both source hash (computed on device via ADB stream) and destination hash match identically. |
+| `SOURCE_HASH_UNAVAILABLE` | Local file hash was successfully computed, but on-device hashing tool (`sha256sum`) was restricted by Android SELinux. Destination integrity is preserved. |
+| `SIZE_MISMATCH` | Local acquired byte size differs from device logical size. |
+| `HASH_MISMATCH` | Source and destination SHA-256 digests do not match. |
+| `PARTIAL` | Acquisition was interrupted before transfer completed. |
 | `FAILED` | Copy or read error occurred during acquisition. |
-| `SKIPPED` | File was excluded by category filter or was previously acquired in a resumed session. |
+| `SKIPPED` | File excluded by category filter, duplicate exclusion, or already verified in a resumed session. |
 
 ---
 
-## 10. Reports
+## 9. Forensic Boundaries & Limitations
 
-Reports are automatically generated inside `reports/`:
-- **`report.html`**: Visual, responsive dashboard with category distribution, candidate lists, integrity audit summary, and forensic disclosures. Filenames and paths are strictly escaped to prevent injection.
-- **`report.csv`**: Delimited tabular dataset containing one record per file with original path, relative path, local destination, sizes, hashes, and verification statuses.
-- **`report.json`**: Machine-readable structured export with complete hardware properties, scan timestamps, and per-file audit entries.
-
----
-
-## 11. Important Forensic & Android Boundaries
-
-### 1. Internal App Sandbox (`/data/data/com.whatsapp/`)
-Standard unrooted ADB communicates exclusively with accessible external and shared storage volumes (`/sdcard/`, `/storage/emulated/0/`). WhatsApp's internal private app directory (`/data/data/com.whatsapp/`) is protected by Android OS sandbox permissions (UID separation and SELinux). It cannot be read without root privileges or physical JTAG/chip-off extractions.
-
-### 2. WhatsApp Cryptographic Keys
-Encrypted WhatsApp databases (`.crypt14` and `.crypt15`) use AES-256-GCM encryption. The decryption key is stored inside private storage at:
-`/data/data/com.whatsapp/files/key`
-
-WRS acquires and preserves encrypted database backups in their exact byte-for-byte raw format. It does not attempt unauthorized decryption, brute-force key generation, or exploit-based privilege escalation.
-
-### 3. Backup Acquisition vs. Deleted Data Recovery
-- **What WRS Does**: Inventories and extracts existing files, dated backups, voice notes, photos, and media remaining in device storage.
-- **What WRS Does Not Do**: WRS does not carve unallocated flash blocks or recover deleted chat records that were never saved to a backup. When a WhatsApp account is re-registered on a new phone, local chats on the previous phone remain preserved in backup files until overwritten or deleted by the user.
+1. **Android App Sandbox**:
+   - Standard unrooted ADB accesses shared and external storage volumes (`/sdcard/`, `/storage/emulated/0/`).
+   - WhatsApp's private internal storage (`/data/data/com.whatsapp/`) is isolated by Android OS UID separation and cannot be accessed without root privileges or physical chip-off extractions.
+2. **Cryptographic Key Handling**:
+   - WhatsApp Crypt14/15 backups require the 32-byte AES key located at `/data/data/com.whatsapp/files/key`.
+   - WRS preserves encrypted backups in their raw, byte-accurate form and provides an AES-GCM decryption adapter for valid user-supplied key material. WRS does not implement brute-force key cracking, unauthorized privilege escalation, or key theft.
+3. **Surviving Data vs. Carving**:
+   - WRS recovers existing files, dated backups, databases, and media from device storage.
+   - Deleted messages purged prior to backup creation without surviving database remnants cannot be carved from flash memory via standard unrooted ADB.
 
 ---
 
-## 12. Troubleshooting
+## 10. Automated Test Suite
 
-| Issue | Cause & Resolution |
-| :--- | :--- |
-| **`adb: command not found`** | ADB is not installed. Run `sudo apt install adb`. |
-| **Device listed as `unauthorized`** | Unlock your phone screen, locate the "Allow USB debugging?" dialog, check "Always allow", and tap OK. |
-| **Device listed as `offline`** | Disconnect and reconnect the USB cable, or run `adb kill-server && adb start-server`. |
-| **No devices detected** | Ensure Developer Options and USB Debugging are enabled on phone. Verify USB cable supports data transfer. |
-| **`Insufficient disk space` warning** | Free space on your Kali workstation destination filesystem or specify an external drive using `--output`. |
+WRS includes a comprehensive suite of 55 automated unit tests:
 
----
-
-## 13. Running Automated Tests
-
-To run the complete automated test suite (31 tests):
 ```bash
+# Run full test suite with pytest
 python3 -m pytest -v tests/
-```
-or with the standard library `unittest`:
-```bash
+
+# Run with standard library unittest
 python3 -m unittest discover tests
 ```
 
+### Test Coverage Summary:
+- `test_acquisition.py`: Preview generation, directory hierarchy, mock ADB pulls, and resumption.
+- `test_case.py`: Append-only `case_events.jsonl`, sensitive key redaction, scan IDs, case comparisons.
+- `test_categorizer.py`: Pattern detection, dated backups, magic byte sniffing, voice notes, stickers, unicode.
+- `test_chat.py`: Message normalization, chronological sorting, group handling, message type mapping.
+- `test_cli.py`: Argument parsing, confirmation default-no, banner generation.
+- `test_database.py`: Classic v1 and modern v2 SQLite adapters, crypt14/15 detection, AES-GCM decryption.
+- `test_device.py`: Device enumeration, property parsing, missing ADB handling.
+- `test_discovery.py`: Standard WhatsApp and WhatsApp Business storage discovery, deduplication.
+- `test_duplicate.py`: Staged duplicate detection (size grouping -> hash comparison), deduplicated acquisition.
+- `test_exporter.py`: TXT, HTML, JSON, CSV chat exports, and validated ZIP packaging with `ZipPackager`.
+- `test_hashing.py`: Memory-bounded streaming SHA-256, verification evaluation.
+- `test_inventory.py`: `ScanInventoryDB` tables, indexes, batch upsert, status updates, duplicate groups.
+- `test_media.py`: Forensic evidence levels (`EXACT_DATABASE_REFERENCE`, `MATCHED_RELATIVE_PATH`, `MATCHED_FILENAME`, `UNMATCHED`).
+- `test_reporting.py`: HTML escaping, CSV/JSON report creation, recovery directory verification.
+- `test_scanner.py`: ADB shell `find` and fallback enumeration with unicode and spaces.
+- `test_validation.py`: Read-only SQLite inspection, path traversal protection, non-SQLite rejection.
+
 ---
 
-## 14. Uninstallation
+## 11. License
 
-To remove WRS completely from your workstation:
-```bash
-rm -rf /path/to/wrs
-```
-*(No background daemons, systemd services, or persistent system modifications are installed.)*
-
----
-
-## 15. License
-
-Released under the **MIT License**. See [LICENSE](file:///home/bablu/TOOLS/wrs/LICENSE) for terms.
+Released under the **MIT License**. See [LICENSE](file:///home/bablu/TOOLS/wrs/LICENSE) for complete details.

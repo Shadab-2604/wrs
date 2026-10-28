@@ -48,3 +48,7 @@ recovery/*
 # Operating system artifacts
 .DS_Store
 Thumbs.db
+
+# Local configuration secrets and device salt
+config/device_salt.bin
+config/*.bin
