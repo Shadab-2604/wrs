@@ -154,23 +154,50 @@ pip install -r requirements.txt --break-system-packages
 
 ## 5. Usage & Commands
 
-### Interactive Menu Mode
-Launch the comprehensive terminal workstation:
-```bash
-python3 wrs.py
+### Device-Aware Startup Preflight
+When WRS launches, it automatically performs preflight checks and queries ADB:
+
+```text
+==============================================================
+          WRS — WHATSAPP RECOVERY SCANNER
+==============================================================
+
+Environment       : Kali GNU/Linux Rolling
+ADB Status        : Available
+Connected Devices : 1
+Current Time      : 2026-10-28 10:15:30
+
+CONNECTED ANDROID DEVICES
+--------------------------------------------------------------
+[1] Device Name : Google Pixel 7
+    Model       : Pixel 7
+    Manufacturer: Google
+    Android     : 14
+    Device ID   : 2824****06G7
+    Status      : CONNECTED / AUTHORIZED
+
+--------------------------------------------------------------
+Selected Device  : Google Pixel 7
+==============================================================
 ```
 
-The menu provides:
+### 9-Option Main Menu
 ```text
-[1] Scan Android device and discover WhatsApp data (Inventory Only)
-[2] Scan and acquire WhatsApp data
-[3] Inspect recovery folder or SQLite database
-[4] Verify acquired files and hashes
-[5] Reconstruct and export chats from acquired database
-[6] Package recovery directory into ZIP archive
-[7] View case audit log and past scans
-[8] View supported recovery locations and limitations
+==============================================================
+          WRS — WHATSAPP RECOVERY SCANNER
+==============================================================
+Selected Device: Google Pixel 7 (2824****06G7)
+
+[1] Scan and discover WhatsApp data
+[2] Scan and acquire data
+[3] Inspect an existing recovery case
+[4] Verify acquired files
+[5] Export reports and ZIP archive
+[6] Review database candidates
+[7] Settings and configuration
+[8] Refresh connected devices
 [9] Exit
+==============================================================
 ```
 
 ### Command-Line Scripting & Headless Automation
@@ -218,6 +245,11 @@ The menu provides:
 - **Verify integrity of an existing recovery folder against its manifest:**
   ```bash
   python3 wrs.py --verify ./recovery/Google_Pixel_7_scan_2026-10-28_10-00-00
+  ```
+
+- **Dry-run inventory simulation (zero files copied or modified):**
+  ```bash
+  python3 wrs.py --device SERIAL_NUMBER --acquire --dry-run
   ```
 
 - **Headless unattended acquisition (for forensic scripting):**
@@ -364,7 +396,7 @@ recovery/
 
 ## 10. Automated Test Suite
 
-WRS includes a comprehensive suite of 55 automated unit tests:
+WRS includes a comprehensive suite of 75 automated unit tests:
 
 ```bash
 # Run full test suite with pytest
@@ -375,6 +407,8 @@ python3 -m unittest discover tests
 ```
 
 ### Test Coverage Summary:
+- `test_device_ux.py`: Device detection, single/multiple device selection, unauthorized/offline/disconnected states, fallback naming, Unicode handling, serial masking, transfer disconnection safety.
+- `test_cli_ux.py`: Persistent screen headers, confirmation prompts, recovery folder naming, plain-text progress fallback, dry-run mode, and persistent configuration.
 - `test_acquisition.py`: Preview generation, directory hierarchy, mock ADB pulls, and resumption.
 - `test_case.py`: Append-only `case_events.jsonl`, sensitive key redaction, scan IDs, case comparisons.
 - `test_categorizer.py`: Pattern detection, dated backups, magic byte sniffing, voice notes, stickers, unicode.

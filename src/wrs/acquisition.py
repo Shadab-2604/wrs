@@ -197,6 +197,9 @@ class AcquisitionManager:
     def _build_scan_dir_path(self, device: DeviceInfo, timestamp: Optional[datetime] = None) -> Path:
         """Create standard directory path: recovery/DEVICE_NAME_scan_YYYY-MM-DD_HH-MM-SS/."""
         clean_dev = sanitize_device_name(device.display_name)
+        if clean_dev in ("", "unknown_device", "Device"):
+            suffix = device.serial[-6:] if len(device.serial) > 6 else (device.serial or "dev")
+            clean_dev = f"Android_Device_{sanitize_device_name(suffix)}"
         slug = get_timestamp_slug(timestamp)
         candidate_name = f"{clean_dev}_scan_{slug}"
         candidate_path = self.base_recovery_dir / candidate_name
@@ -361,6 +364,33 @@ class AcquisitionManager:
                 if safe_dest_path.exists() and safe_dest_path.stat().st_size != sfile.size_bytes:
                     safe_dest_path = resolve_unique_filepath(safe_dest_path.parent, safe_dest_path.name)
 
+                # Check device connection before initiating pull
+                if not self.executor.is_device_connected(device.serial):
+                    disconn_msg = f"Device {device.display_name} ({device.serial}) disconnected during acquisition."
+                    logger.error(disconn_msg)
+                    errors_log.append({
+                        "file": sfile.original_path,
+                        "destination": str(safe_dest_path),
+                        "error": disconn_msg,
+                        "timestamp": format_timestamp(),
+                    })
+                    case_mgr.log_event(sid, "DEVICE_DISCONNECTED", {
+                        "serial": device.serial,
+                        "files_completed": len(records),
+                        "files_total": total_files,
+                    })
+                    interrupted_path = dir_tree["metadata"] / "interrupted.json"
+                    with open(interrupted_path, "w", encoding="utf-8") as f:
+                        json.dump({
+                            "scan_id": sid,
+                            "reason": "DEVICE_DISCONNECTED",
+                            "serial": device.serial,
+                            "interrupted_at": format_timestamp(),
+                            "files_completed": len(records),
+                            "files_total": total_files,
+                        }, f, indent=2)
+                    break
+
                 # 3. Pull file via ADB (explicit argument list, no shell=True)
                 pull_cmd = ["pull", sfile.original_path, str(safe_dest_path)]
                 pull_res = self.executor.run_cmd(pull_cmd, serial=device.serial, timeout=300)
@@ -374,6 +404,25 @@ class AcquisitionManager:
                         "error": copy_err,
                         "timestamp": format_timestamp(),
                     })
+                    # If error indicates disconnection, break loop safely
+                    err_lower = copy_err.lower()
+                    if "device offline" in err_lower or "device not found" in err_lower or "closed" in err_lower:
+                        case_mgr.log_event(sid, "DEVICE_DISCONNECTED", {
+                            "serial": device.serial,
+                            "files_completed": len(records),
+                            "files_total": total_files,
+                        })
+                        interrupted_path = dir_tree["metadata"] / "interrupted.json"
+                        with open(interrupted_path, "w", encoding="utf-8") as f:
+                            json.dump({
+                                "scan_id": sid,
+                                "reason": "DEVICE_DISCONNECTED",
+                                "serial": device.serial,
+                                "interrupted_at": format_timestamp(),
+                                "files_completed": len(records),
+                                "files_total": total_files,
+                            }, f, indent=2)
+                        break
 
                 # 4. Hash acquired file locally
                 dest_hash, acquired_sz, hash_err = hash_local_file(safe_dest_path)

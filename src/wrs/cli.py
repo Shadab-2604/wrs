@@ -1,7 +1,8 @@
 """Interactive CLI interface and command-line argument dispatcher for WRS.
 
-Provides rich terminal presentation, device selection menus, pre-acquisition
-previews, explicit confirmation safeguards, and headless automation.
+Provides rich terminal presentation, device detection and selection, pre-acquisition
+previews, explicit confirmation safeguards, professional progress displays,
+structured error handling, persistent configuration, and headless automation.
 """
 
 from __future__ import annotations
@@ -9,11 +10,12 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import platform
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import Any, Callable, List, Optional, Set, Tuple
 
 from . import __version__
 from .acquisition import AcquisitionManager, AcquisitionPreview
@@ -24,6 +26,18 @@ from .database import WhatsAppDatabaseAnalyzer
 from .device import AdbExecutor, DeviceInfo
 from .discovery import DiscoveredLocation, StorageDiscovery
 from .duplicate import DuplicateDetector
+from .errors import (
+    ERR_ADB_NOT_FOUND,
+    ERR_DEVICE_DISCONNECTED,
+    ERR_DEVICE_OFFLINE,
+    ERR_DEVICE_UNAUTHORIZED,
+    ERR_INSUFFICIENT_SPACE,
+    ERR_NO_DEVICE_CONNECTED,
+    ERR_NO_WHATSAPP_STORAGE,
+    ERR_STORAGE_PERMISSION_DENIED,
+    ERR_TRANSFER_INTERRUPTED,
+    format_actionable_error,
+)
 from .exporter import ChatExporter, ZipPackager
 from .hashing import STATUS_VERIFIED
 from .inventory import ScanInventoryDB
@@ -35,8 +49,11 @@ from .utils import (
     format_bytes,
     format_timestamp,
     load_settings,
+    mask_serial,
     sanitize_device_name,
     sanitize_filename,
+    save_settings,
+    validate_settings,
 )
 
 logger = logging.getLogger("wrs.cli")
@@ -53,80 +70,282 @@ except ImportError:
     console = None  # type: ignore
 
 
-def print_banner(executor: AdbExecutor) -> None:
+def get_environment_name() -> str:
+    """Detect local OS environment, preferring distribution name on Linux."""
+    try:
+        os_rel = Path("/etc/os-release")
+        if os_rel.exists():
+            with open(os_rel, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("PRETTY_NAME="):
+                        return line.split("=", 1)[1].strip().strip('"')
+    except Exception:
+        pass
+    return f"{platform.system()} {platform.release()}"
+
+
+def print_banner(
+    executor: AdbExecutor,
+    device: Optional[DeviceInfo] = None,
+    settings: Optional[dict[str, Any]] = None,
+) -> None:
     """Display professional terminal banner."""
     adb_ok, adb_msg = executor.get_adb_version()
-    adb_status = f"Connected ({adb_msg})" if adb_ok else f"Unavailable ({adb_msg})"
+    adb_status = f"Available ({adb_msg})" if adb_ok else f"Unavailable ({adb_msg})"
     now_str = format_timestamp()
+    env_str = get_environment_name()
+
+    mask = False
+    if settings and settings.get("ui", {}).get("mask_device_serial"):
+        mask = True
+
+    dev_str = "None"
+    if device:
+        s_disp = device.get_display_serial(masked=mask)
+        dev_str = f"{device.display_name} ({s_disp})" if s_disp else device.display_name
 
     if HAS_RICH and console:
         title = Text("WRS — WhatsApp Recovery Scanner", style="bold cyan")
         subtitle = Text("Forensic Acquisition & Preservation Utility\n", style="dim")
         body = (
-            f"[bold green]●[/bold green] Processing Mode: [bold]100% Local Execution (Zero Network / Cloud)[/bold]\n"
-            f"[bold blue]●[/bold blue] ADB Status: [white]{adb_status}[/white]\n"
-            f"[bold magenta]●[/bold magenta] Version: [white]v{__version__}[/white] | Timestamp: [white]{now_str}[/white]"
+            f"[bold green]●[/bold green] Environment    : [white]{env_str}[/white]\n"
+            f"[bold blue]●[/bold blue] Processing Mode: [bold]100% Local Execution (Zero Network / Cloud)[/bold]\n"
+            f"[bold cyan]●[/bold cyan] ADB Status      : [white]{adb_status}[/white]\n"
+            f"[bold yellow]●[/bold yellow] Selected Device : [bold white]{dev_str}[/bold white]\n"
+            f"[bold magenta]●[/bold magenta] Version        : [white]v{__version__}[/white] | Timestamp: [white]{now_str}[/white]"
         )
         panel = Panel(body, title=title, subtitle=subtitle, border_style="cyan")
         console.print(panel)
     else:
         print("=" * 72)
-        print(f"  WRS — WhatsApp Recovery Scanner (v{__version__})")
+        print(f"  WRS — WHATSAPP RECOVERY SCANNER (v{__version__})")
         print("  Forensic Acquisition & Preservation Utility")
-        print("  Processing: 100% Local Execution — Zero Network / Cloud Telemetry")
-        print(f"  ADB Status: {adb_status}")
-        print(f"  Timestamp : {now_str}")
+        print(f"  Environment    : {env_str}")
+        print("  Processing     : 100% Local Execution — Zero Network / Cloud Telemetry")
+        print(f"  ADB Status     : {adb_status}")
+        print(f"  Selected Device: {dev_str}")
+        print(f"  Timestamp      : {now_str}")
         print("=" * 72)
 
 
-def select_device_interactive(executor: AdbExecutor) -> Optional[DeviceInfo]:
-    """Present a numbered list of connected devices for explicit user selection."""
-    devices = executor.list_devices()
+def print_screen_header(
+    title: str,
+    device: Optional[DeviceInfo] = None,
+    settings: Optional[dict[str, Any]] = None,
+) -> None:
+    """Print consistent screen header ensuring selected device remains visible."""
+    mask = False
+    if settings and settings.get("ui", {}).get("mask_device_serial"):
+        mask = True
 
+    dev_label = device.display_name if device else "No Device Selected"
+    if device and device.serial:
+        s_disp = device.get_display_serial(masked=mask)
+        dev_label = f"{device.display_name} ({s_disp})"
+
+    print("\n" + "=" * 65)
+    print(f"  WRS — {title.upper()}")
+    print("=" * 65)
+    print(f"  Selected Device : {dev_label}")
+    print("-" * 65)
+
+
+def detect_and_display_startup_devices(
+    executor: AdbExecutor,
+    settings: Optional[dict[str, Any]] = None,
+) -> Tuple[List[DeviceInfo], Optional[DeviceInfo]]:
+    """Perform preflight checks and query ADB.
+
+    Displays environment, ADB status, connected devices count, current time,
+    and a structured device table before returning (all_devices, selected_device).
+    """
+    adb_ok, adb_msg = executor.get_adb_version()
+    adb_status = f"Available" if adb_ok else f"Unavailable ({adb_msg})"
+    env_str = get_environment_name()
+    now_str = format_timestamp()
+
+    mask = False
+    if settings and settings.get("ui", {}).get("mask_device_serial"):
+        mask = True
+
+    if not adb_ok:
+        print("\n" + "=" * 62)
+        print("          WRS — WHATSAPP RECOVERY SCANNER")
+        print("=" * 62)
+        print(f"Environment       : {env_str}")
+        print(f"ADB Status        : {adb_status}")
+        print(f"Connected Devices : 0")
+        print(f"Current Time      : {now_str}")
+        print(format_actionable_error(ERR_ADB_NOT_FOUND, context=adb_msg))
+        return [], None
+
+    # Enumerate devices
+    raw_devices = executor.list_devices()
+    devices: List[DeviceInfo] = []
+    for d in raw_devices:
+        details = executor.get_device_details(d.serial)
+        devices.append(details)
+
+    print("\n" + "=" * 62)
+    print("          WRS — WHATSAPP RECOVERY SCANNER")
+    print("=" * 62)
+    print(f"Environment       : {env_str}")
+    print(f"ADB Status        : {adb_status}")
+    print(f"Connected Devices : {len(devices)}")
+    print(f"Current Time      : {now_str}")
+    print("\nCONNECTED ANDROID DEVICES")
+    print("-" * 62)
+
+    # 1. Zero devices connected
     if not devices:
-        print("\n[!] No connected Android devices detected via ADB.")
-        print("    Troubleshooting steps:")
-        print("    1. Connect device via USB and ensure Developer Options is enabled.")
-        print("    2. Enable 'USB Debugging' in Developer Options.")
-        print("    3. If prompted on device, check 'Always allow' and tap OK.")
-        print("    4. Run 'adb devices' in terminal to verify connection.\n")
+        print("[!] No authorized Android device detected.\n")
+        print("1. Connect the Android phone using USB.")
+        print("2. Enable USB debugging.")
+        print("3. Unlock the phone.")
+        print("4. Approve the USB debugging authorization prompt.")
+        print("5. Run the device detection command again.\n")
+        print("[R] Retry")
+        print("[Q] Exit")
+        print("-" * 62)
+        print("Selected Device  : None")
+        print("=" * 62 + "\n")
+        return [], None
+
+    # 2. Exactly one device connected
+    if len(devices) == 1:
+        dev = devices[0]
+        s_id = dev.get_display_serial(masked=mask)
+        mfg = dev.manufacturer if dev.manufacturer != "Unknown" else "Unavailable"
+        mdl = dev.model if dev.model != "Unknown" else "Unavailable"
+        av = dev.android_version if dev.android_version != "Unknown" else "Unavailable"
+
+        print(f"[1] Device Name : {dev.display_name}")
+        print(f"    Model       : {mdl}")
+        print(f"    Manufacturer: {mfg}")
+        print(f"    Android     : {av}")
+        print(f"    Device ID   : {s_id}")
+        print(f"    Status      : {dev.status_display}")
+        print("-" * 62)
+
+        if dev.is_accessible:
+            print(f"Selected Device  : {dev.display_name}")
+            print("=" * 62 + "\n")
+            return devices, dev
+        else:
+            print(f"Selected Device  : {dev.display_name} ({dev.status_display})")
+            print("=" * 62 + "\n")
+            if dev.state == "unauthorized":
+                print(format_actionable_error(ERR_DEVICE_UNAUTHORIZED, device_name=dev.display_name))
+            elif dev.state == "offline":
+                print(format_actionable_error(ERR_DEVICE_OFFLINE, device_name=dev.display_name))
+            return devices, dev
+
+    # 3. Multiple devices connected
+    for idx, d in enumerate(devices, start=1):
+        s_id = d.get_display_serial(masked=mask)
+        mfg = d.manufacturer if d.manufacturer != "Unknown" else "Unavailable"
+        mdl = d.model if d.model != "Unknown" else "Unavailable"
+        av = d.android_version if d.android_version != "Unknown" else "Unavailable"
+
+        print(f"[{idx}] Device Name : {d.display_name}")
+        print(f"    Model       : {mdl}")
+        print(f"    Manufacturer: {mfg}")
+        print(f"    Android     : {av}")
+        print(f"    Device ID   : {s_id}")
+        print(f"    Status      : {d.status_display}")
+
+    print("-" * 62)
+    print("CONNECTED DEVICES\n")
+    for idx, d in enumerate(devices, start=1):
+        mdl_str = d.model if d.model != "Unknown" else "Model Unavailable"
+        st_compact = "AUTHORIZED" if d.is_authorized else d.status_display
+        print(f"[{idx}] {d.display_name} | {mdl_str} | {st_compact}")
+    print("-" * 62)
+
+    while True:
+        try:
+            choice = input(f"\nSelect device [1-{len(devices)}] or 'q' to exit: ").strip().lower()
+            if choice == "q":
+                sys.exit(0)
+            c_idx = int(choice)
+            if 1 <= c_idx <= len(devices):
+                selected = devices[c_idx - 1]
+                print(f"Selected Device  : {selected.display_name}")
+                print("=" * 62 + "\n")
+                if not selected.is_accessible:
+                    if selected.state == "unauthorized":
+                        print(format_actionable_error(ERR_DEVICE_UNAUTHORIZED, device_name=selected.display_name))
+                    elif selected.state == "offline":
+                        print(format_actionable_error(ERR_DEVICE_OFFLINE, device_name=selected.display_name))
+                return devices, selected
+            print(f"Invalid selection. Please choose a number between 1 and {len(devices)}.")
+        except (ValueError, KeyboardInterrupt):
+            print("\nSelection cancelled.")
+            return devices, None
+
+
+def select_device_interactive(
+    executor: AdbExecutor,
+    settings: Optional[dict[str, Any]] = None,
+) -> Optional[DeviceInfo]:
+    """Present a numbered table of connected devices for explicit user selection."""
+    mask = False
+    if settings and settings.get("ui", {}).get("mask_device_serial"):
+        mask = True
+
+    devices = executor.list_devices()
+    if not devices:
+        print(format_actionable_error(ERR_NO_DEVICE_CONNECTED))
         return None
 
     if len(devices) == 1:
         dev = devices[0]
         details = executor.get_device_details(dev.serial)
-        print(f"\n[+] Detected single device: {details.display_name} ({details.serial}) - State: {details.state}")
-        if details.error_message:
-            print(f"[!] Warning: {details.error_message}")
+        print(f"\n[+] Selected Device: {details.display_name} ({details.get_display_serial(masked=mask)}) — [{details.status_display}]")
+        if not details.is_accessible:
+            if details.state == "unauthorized":
+                print(format_actionable_error(ERR_DEVICE_UNAUTHORIZED, device_name=details.display_name))
+            elif details.state == "offline":
+                print(format_actionable_error(ERR_DEVICE_OFFLINE, device_name=details.display_name))
         return details
 
-    print("\n--- Connected Android Devices ---")
+    print("\nCONNECTED DEVICES")
+    print("-" * 62)
+    detailed_list: List[DeviceInfo] = []
     for idx, d in enumerate(devices, start=1):
-        status_str = f"[{d.state.upper()}]"
-        print(f"  [{idx}] {d.serial} — {d.display_name} {status_str}")
+        det = executor.get_device_details(d.serial)
+        detailed_list.append(det)
+        mdl = det.model if det.model != "Unknown" else "Model Unavailable"
+        print(f"[{idx}] {det.display_name} | {mdl} | {det.status_display}")
+    print("-" * 62)
 
     while True:
         try:
-            choice = input(f"\nSelect device [1-{len(devices)}] or 'c' to cancel: ").strip().lower()
+            choice = input(f"\nSelect device [1-{len(detailed_list)}] or 'c' to cancel: ").strip().lower()
             if choice == "c":
                 return None
             idx = int(choice)
-            if 1 <= idx <= len(devices):
-                selected = devices[idx - 1]
-                return executor.get_device_details(selected.serial)
+            if 1 <= idx <= len(detailed_list):
+                selected = detailed_list[idx - 1]
+                if not selected.is_accessible:
+                    if selected.state == "unauthorized":
+                        print(format_actionable_error(ERR_DEVICE_UNAUTHORIZED, device_name=selected.display_name))
+                    elif selected.state == "offline":
+                        print(format_actionable_error(ERR_DEVICE_OFFLINE, device_name=selected.display_name))
+                return selected
             print("Invalid selection. Please choose a valid number.")
         except (ValueError, KeyboardInterrupt):
             print("\nSelection cancelled.")
             return None
 
 
-def select_location_interactive(locations: List[DiscoveredLocation]) -> Optional[List[DiscoveredLocation]]:
+def select_location_interactive(locations: List[DiscoveredLocation], device_name: str) -> Optional[List[DiscoveredLocation]]:
     """Prompt user to choose which discovered WhatsApp locations to scan."""
     if not locations:
-        print("\n[!] No accessible WhatsApp storage locations discovered on device.")
+        print(format_actionable_error(ERR_NO_WHATSAPP_STORAGE, device_name=device_name))
         return None
 
-    print("\n--- Discovered WhatsApp Storage Locations ---")
+    print(f"\n--- Discovered WhatsApp Storage Locations on {device_name} ---")
     for idx, loc in enumerate(locations, start=1):
         print(f"  [{idx}] {loc.display_label}")
         if loc.aliases:
@@ -158,24 +377,45 @@ def select_location_interactive(locations: List[DiscoveredLocation]) -> Optional
             return None
 
 
-def display_preview(preview: AcquisitionPreview) -> None:
-    """Display the pre-acquisition preview table."""
+def display_preview(
+    preview: AcquisitionPreview,
+    settings: Optional[dict[str, Any]] = None,
+) -> None:
+    """Display comprehensive pre-acquisition preview table."""
+    mask = False
+    if settings and settings.get("ui", {}).get("mask_device_serial"):
+        mask = True
+
+    disp_serial = mask_serial(preview.serial) if mask else preview.serial
+    margin_b = 104857600
+    margin_ratio = 0.10
+    if settings and "acquisition" in settings:
+        margin_b = settings["acquisition"].get("safety_margin_bytes", margin_b)
+        margin_ratio = settings["acquisition"].get("safety_margin_ratio", margin_ratio)
+
     print("\n" + "=" * 72)
     print("  WRS — ACQUISITION PREVIEW")
     print("=" * 72)
-    print(f"  Scan ID          : {preview.scan_id}")
-    print(f"  Device           : {preview.device_name}")
-    print(f"  Serial           : {preview.serial}")
-    print(f"  Android Version  : {preview.android_version}")
-    print(f"  Scan Date        : {preview.scan_date}")
-    print(f"  Selected Location: {', '.join(preview.selected_locations)}")
+    print(f"  Scan ID                 : {preview.scan_id}")
+    print(f"  Device Name & Model     : {preview.device_name}")
+    print(f"  Device Serial / ID      : {disp_serial}")
+    print(f"  Android OS Version      : {preview.android_version}")
+    print(f"  Scan Timestamp          : {preview.scan_date}")
+    print(f"  Selected Source Scope   : {', '.join(preview.selected_locations)}")
+    print(f"  Eligible Files Selected : {preview.total_files}")
+    avail_b = getattr(preview, "available_space", getattr(preview, "available_bytes", 0))
+    req_b = getattr(preview, "required_space_with_margin", getattr(preview, "required_bytes", 0))
+    print(f"  Available Disk Space    : {format_bytes(avail_b)}")
+    print(f"  Estimated Required Space: {format_bytes(req_b)}")
+    print(f"  Configured Safety Margin: {format_bytes(margin_b)} ({int(margin_ratio * 100)}% dynamic)")
+    print(f"  Target Destination Path : {preview.destination_path}")
     print("-" * 72)
 
     if HAS_RICH and console:
-        tbl = Table(title="Categorized File Inventory", show_header=True, header_style="bold magenta")
-        tbl.add_column("Category", style="cyan", width=20)
+        tbl = Table(title="Categorized Acquisition Scope", show_header=True, header_style="bold magenta")
+        tbl.add_column("Category", style="cyan", width=22)
         tbl.add_column("Files", justify="right", style="green", width=12)
-        tbl.add_column("Total Size", justify="right", style="yellow", width=16)
+        tbl.add_column("Total Size", justify="right", style="yellow", width=18)
 
         for cat in ALL_CATEGORIES:
             cnt = preview.category_counts.get(cat, 0)
@@ -186,32 +426,58 @@ def display_preview(preview: AcquisitionPreview) -> None:
         tbl.add_row("TOTAL", str(preview.total_files), format_bytes(preview.total_bytes), style="bold white")
         console.print(tbl)
     else:
-        print(f"  {'CATEGORY':<20} {'FILES':>10}   {'TOTAL SIZE':>15}")
-        print("  " + "-" * 50)
+        print(f"  {'CATEGORY':<22} {'FILES':>10}   {'TOTAL SIZE':>18}")
+        print("  " + "-" * 56)
         for cat in ALL_CATEGORIES:
             cnt = preview.category_counts.get(cat, 0)
             sz = preview.category_bytes.get(cat, 0)
             if cnt > 0:
-                print(f"  {cat:<20} {cnt:>10}   {format_bytes(sz):>15}")
-        print("  " + "-" * 50)
-        print(f"  {'TOTAL':<20} {preview.total_files:>10}   {format_bytes(preview.total_bytes):>15}\n")
+                print(f"  {cat:<22} {cnt:>10}   {format_bytes(sz):>18}")
+        print("  " + "-" * 56)
+        print(f"  {'TOTAL':<22} {preview.total_files:>10}   {format_bytes(preview.total_bytes):>18}\n")
 
-    print(f"  Unreadable Files       : {preview.unreadable_files}")
-    print(f"  Skipped Files          : {preview.skipped_files}")
-    print(f"  Database/Backup Assets : {preview.database_backup_candidates}")
-    print(f"  Duplicate Candidates   : {preview.duplicate_candidates}")
+    if preview.unreadable_files > 0:
+        print(f"  [!] Inaccessible / Unreadable Files : {preview.unreadable_files}")
+    if preview.skipped_files > 0:
+        print(f"  [*] Filtered / Skipped Files        : {preview.skipped_files}")
+    print(f"  Database / Backup Candidates        : {preview.database_backup_candidates}")
+    print(f"  Duplicate Content Candidates        : {preview.duplicate_candidates}")
     if preview.excluded_duplicates_count > 0:
-        print(f"  Excluded Duplicates    : {preview.excluded_duplicates_count} ({format_bytes(preview.excluded_duplicates_bytes)} saved)")
-    print(f"  Destination Directory  : {preview.destination_path}")
-    print(f"  Storage Assessment     : {preview.space_message}")
+        print(f"  Excluded Duplicate Copies           : {preview.excluded_duplicates_count} ({format_bytes(preview.excluded_duplicates_bytes)} saved)")
+    print(f"  Storage Assessment                  : {preview.space_message}")
     print("=" * 72 + "\n")
 
 
-def ask_acquisition_confirmation(dest_path: Path) -> bool:
-    """Prompt user with mandatory confirmation before acquiring files."""
-    print("The scanner is ready to copy the selected files to:")
-    print(f"  {dest_path}")
-    print("\nNo source files will be deleted or modified on the Android device.\n")
+def ask_acquisition_confirmation(
+    target: Any,
+    dest_path: Optional[Path] = None,
+    device_name: Optional[str] = None,
+) -> bool:
+    """Prompt user with mandatory confirmation before acquiring files.
+
+    Defaults safely to No.
+    """
+    if isinstance(target, AcquisitionPreview):
+        dev = target.device_name
+        files_cnt = str(target.total_files)
+        total_sz = format_bytes(target.total_bytes)
+        dst = str(dest_path or target.destination_path)
+    else:
+        dev = device_name or "Android Device"
+        files_cnt = "Selected scope"
+        total_sz = "As calculated in preview"
+        dst = str(target)
+
+    print("\n" + "=" * 65)
+    print("  ACQUISITION PREVIEW & CONFIRMATION")
+    print("=" * 65)
+    print(f"  Device       : {dev}")
+    print(f"  Files        : {files_cnt}")
+    print(f"  Total Size   : {total_sz}")
+    print(f"  Destination  : {dst}")
+    print("=" * 65)
+    print("The scanner is ready to copy the selected files to the destination above.")
+    print("No source files will be deleted or modified on the Android device.\n")
 
     try:
         ans = input("Proceed with acquisition? [y/N]: ").strip().lower()
@@ -227,6 +493,7 @@ def select_acquisition_scope_interactive(
     dev: DeviceInfo,
     scan_result: ScanResult,
     override_output: Optional[Path],
+    settings: Optional[dict[str, Any]] = None,
 ) -> Tuple[Optional[AcquisitionPreview], Optional[Set[str]], Optional[Set[str]], bool]:
     """Provide interactive selection options and dynamically recalculate preview.
 
@@ -237,12 +504,12 @@ def select_acquisition_scope_interactive(
     excluded_paths: Optional[Set[str]] = None
 
     while True:
-        display_preview(cur_preview)
+        display_preview(cur_preview, settings)
         print("Acquisition Selection Options:")
         print("  [1] Proceed with current selection")
         print("  [2] Select specific categories")
         print("  [3] Exclude duplicate candidate files")
-        print("  [4] Export inventory catalog only")
+        print("  [4] Export inventory catalog only (No file copy)")
         print("  [5] Cancel")
 
         try:
@@ -297,6 +564,103 @@ def select_acquisition_scope_interactive(
             return None, None, None, False
 
 
+def make_discovery_progress_callback(
+    device_name: str,
+    location_path: str,
+    progress_enabled: bool = True,
+) -> Callable[[str, int, int, float], None]:
+    """Create discovery progress callback with plain-text fallback."""
+    last_print = [0.0]
+
+    def disc_progress(phase: str, count: int, total: int, elapsed: float) -> None:
+        now = time.time()
+        if not progress_enabled:
+            if count % 250 == 0 or count < 10:
+                print(f"[*] Scope: Accessible paths | Discovered: {count} files ({elapsed:.1f}s)")
+            return
+
+        if now - last_print[0] > 0.1 or count < 10:
+            last_print[0] = now
+            sys.stdout.write(
+                f"\r[*] DEVICE: {device_name[:16]} | {phase}: {count} accessible files | Elapsed: {elapsed:.1f}s"
+            )
+            sys.stdout.flush()
+
+    return disc_progress
+
+
+def make_acquisition_progress_callback(
+    device_name: str,
+    total_files: int,
+    progress_enabled: bool = True,
+) -> Callable[[int, int, int, int, str, str, float], None]:
+    """Create acquisition progress callback with real-time ETA and plain-text fallback."""
+    last_print = [0.0]
+    failure_count = [0]
+
+    def acq_progress(
+        completed: int,
+        remaining: int,
+        trans_b: int,
+        tot_b: int,
+        cur_fn: str,
+        stat: str,
+        elapsed: float,
+    ) -> None:
+        if stat in ("FAILED", "MISMATCH"):
+            failure_count[0] += 1
+
+        now = time.time()
+        if not progress_enabled:
+            if completed % 25 == 0 or remaining == 0:
+                print(
+                    f"[{completed}/{total_files}] Device: {device_name} | "
+                    f"Transferred: {format_bytes(trans_b)} | File: {cur_fn} | Status: {stat}"
+                )
+            return
+
+        if now - last_print[0] > 0.12 or remaining == 0:
+            last_print[0] = now
+            pct = (trans_b / tot_b * 100) if tot_b > 0 else 0
+            speed = trans_b / elapsed if elapsed > 0 else 0
+            eta_str = ""
+            if speed > 0 and tot_b > trans_b:
+                eta_sec = int((tot_b - trans_b) / speed)
+                eta_str = f" | ETA: {eta_sec}s"
+
+            fn_disp = cur_fn[:22] + "..." if len(cur_fn) > 25 else cur_fn
+            sys.stdout.write(
+                f"\rDEVICE: {device_name[:14]} | PROGRESS: {completed}/{total_files} ({pct:4.1f}%) | "
+                f"BYTES: {format_bytes(trans_b)} | FILE: {fn_disp:<25} | STAT: {stat:<8} | FAILS: {failure_count[0]}{eta_str}"
+            )
+            sys.stdout.flush()
+
+    return acq_progress
+
+
+def display_scan_completed_summary(
+    device: DeviceInfo,
+    scan_result: ScanResult,
+    report_dir: Path,
+) -> None:
+    """Present concise summary screen after discovery scan (Requirement 9.C)."""
+    db_cnt = scan_result.category_counts.get("Databases", 0) + scan_result.category_counts.get("Backups", 0)
+    media_cats = ["Images", "Videos", "Audio", "Voice_Notes", "Stickers", "Animated_GIFs"]
+    media_cnt = sum(scan_result.category_counts.get(c, 0) for c in media_cats)
+
+    print("\n" + "=" * 65)
+    print("  SCAN COMPLETED")
+    print("=" * 65)
+    print(f"  Device             : {device.display_name}")
+    print(f"  Files discovered   : {scan_result.total_files}")
+    print(f"  Total data         : {format_bytes(scan_result.total_bytes)}")
+    print(f"  Database candidates: {db_cnt}")
+    print(f"  Media files        : {media_cnt}")
+    print(f"  Inaccessible paths : {len(scan_result.errors)}")
+    print(f"  Reports            : {report_dir}")
+    print("=" * 65 + "\n")
+
+
 def run_interactive_workflow(
     executor: AdbExecutor,
     acquire_mode: bool = False,
@@ -306,53 +670,69 @@ def run_interactive_workflow(
     selected_cats: Optional[Set[str]] = None,
     exclude_duplicates: bool = False,
     key_path: Optional[Path] = None,
+    dry_run: bool = False,
+    settings: Optional[dict[str, Any]] = None,
 ) -> None:
     """Execute complete workflow: Discovery -> Inventory -> Preview -> Confirmation -> Acquisition -> Report."""
-    print_banner(executor)
+    cfg = settings or load_settings()
+    progress_enabled = bool(cfg.get("ui", {}).get("progress_display_enabled", True))
 
-    # 1. Device Selection
+    # 1. Device Selection & Pre-verification
     if override_serial:
         dev = executor.get_device_details(override_serial)
     else:
-        dev = select_device_interactive(executor)
+        dev = select_device_interactive(executor, cfg)
 
     if not dev:
         return
 
+    # Check connection stability
+    if not executor.is_device_connected(dev.serial):
+        print(format_actionable_error(ERR_DEVICE_DISCONNECTED, device_name=dev.display_name))
+        return
+
     if not dev.is_accessible:
-        print(f"\n[!] Cannot proceed: Device state is '{dev.state}'.")
-        if dev.error_message:
-            print(f"    {dev.error_message}")
+        if dev.state == "unauthorized":
+            print(format_actionable_error(ERR_DEVICE_UNAUTHORIZED, device_name=dev.display_name))
+        elif dev.state == "offline":
+            print(format_actionable_error(ERR_DEVICE_OFFLINE, device_name=dev.display_name))
+        else:
+            print(format_actionable_error(f"ERR_STATE_{dev.state.upper()}", context=dev.error_message, device_name=dev.display_name))
         return
 
     # 2. Storage Discovery
-    print(f"\n[*] Discovering WhatsApp storage on {dev.display_name} ({dev.serial})...")
+    print_screen_header("STORAGE DISCOVERY", dev, cfg)
+    print(f"[*] Discovering WhatsApp storage on {dev.display_name} ({dev.get_display_serial()})...")
     discovery = StorageDiscovery(executor)
     locations = discovery.discover_locations(dev)
 
     if not locations:
-        print("[!] No accessible WhatsApp storage locations discovered.")
+        print(format_actionable_error(ERR_NO_WHATSAPP_STORAGE, device_name=dev.display_name))
         return
 
-    selected_locs = [loc for loc in locations if loc.is_readable] if unattended else select_location_interactive(locations)
+    selected_locs = [loc for loc in locations if loc.is_readable] if unattended else select_location_interactive(locations, dev.display_name)
     if not selected_locs:
         print("[*] Operation cancelled.")
         return
 
     # 3. Scanning & Inventory
     scanner = FileScanner(executor)
-    acq_manager = AcquisitionManager(executor, base_recovery_dir=override_output or "recovery")
+    base_rec = override_output or Path(cfg.get("acquisition", {}).get("default_recovery_dir", "recovery"))
+    acq_manager = AcquisitionManager(executor, base_recovery_dir=base_rec)
 
     for loc in selected_locs:
-        print(f"\n[*] Scanning location: {loc.path}")
-        print("    Enumerating files without modification...")
+        # Verify device remains attached
+        if not executor.is_device_connected(dev.serial):
+            print(format_actionable_error(ERR_DEVICE_DISCONNECTED, device_name=dev.display_name))
+            return
 
-        def scan_progress(phase: str, count: int, total: int, elapsed: float) -> None:
-            sys.stdout.write(f"\r    ↳ {phase}: {count} files found ({elapsed:.1f}s)")
-            sys.stdout.flush()
+        print_screen_header("SCAN & INVENTORY", dev, cfg)
+        print(f"[*] Scanning location: {loc.path}")
+        print("    Enumerating files without modification (Scope: Accessible selected locations)...")
 
-        scan_result = scanner.scan_location(dev.serial, loc, progress_cb=scan_progress)
-        print(f"\n[+] Scan completed: {scan_result.total_files} files ({format_bytes(scan_result.total_bytes)})")
+        scan_cb = make_discovery_progress_callback(dev.display_name, loc.path, progress_enabled)
+        scan_result = scanner.scan_location(dev.serial, loc, progress_cb=scan_cb)
+        print(f"\n[+] Scan completed: {scan_result.total_files} accessible files ({format_bytes(scan_result.total_bytes)})")
 
         # 4. Mandatory Pre-Acquisition Preview
         preview = acq_manager.generate_preview(
@@ -377,9 +757,27 @@ def run_interactive_workflow(
                 scan_id=preview.scan_id,
             )
 
+        # Handle Dry-Run Mode
+        if dry_run:
+            display_preview(preview, cfg)
+            print("\n" + "=" * 65)
+            print("  DRY RUN SIMULATION RESULT")
+            print("=" * 65)
+            print(f"  Device              : {dev.display_name}")
+            print(f"  Simulated Mode      : DRY-RUN (Zero Files Copied or Modified)")
+            print(f"  Target Scope        : {preview.total_files} files ({format_bytes(preview.total_bytes)})")
+            print(f"  Database Candidates : {preview.database_backup_candidates}")
+            req_b = getattr(preview, "required_space_with_margin", getattr(preview, "required_bytes", 0))
+            avail_b = getattr(preview, "available_space", getattr(preview, "available_bytes", 0))
+            print(f"  Required Space      : {format_bytes(req_b)}")
+            print(f"  Available Space     : {format_bytes(avail_b)}")
+            print(f"  Storage Assessment  : {preview.space_message}")
+            print("=" * 65 + "\n")
+            return
+
         if acquire_mode and not unattended:
             scope_preview, updated_cats, updated_excluded, proceed = select_acquisition_scope_interactive(
-                preview, acq_manager, dev, scan_result, override_output
+                preview, acq_manager, dev, scan_result, override_output, cfg
             )
             if not proceed or not scope_preview:
                 if scope_preview and not proceed:
@@ -392,56 +790,46 @@ def run_interactive_workflow(
                 selected_cats = updated_cats
                 excluded_paths = updated_excluded
         else:
-            display_preview(preview)
+            display_preview(preview, cfg)
 
         # 5. Check Disk Space
         if not preview.has_sufficient_space:
-            print("[!] HALTING: Target destination does not have sufficient free disk space.")
-            print(f"    {preview.space_message}")
+            print(format_actionable_error(ERR_INSUFFICIENT_SPACE, context=preview.space_message, device_name=dev.display_name))
             return
 
         if not acquire_mode:
-            # Inventory-only mode: save inventory metadata and generate report
+            # Inventory-only mode: save catalog and generate reports
             print("[*] Inventory-only scan requested. Saving scan catalog...")
             dest_tree = acq_manager.setup_recovery_tree(preview.destination_path)
             rep_gen = ReportGenerator(dev, scan_result, output_dir=dest_tree["reports"])
             h, c, j = rep_gen.generate_all()
-            print(f"[+] Reports generated:\n    HTML: {h}\n    CSV : {c}\n    JSON: {j}")
+            display_scan_completed_summary(dev, scan_result, dest_tree["reports"])
             continue
 
         # 6. Explicit Acquisition Confirmation
         confirmed = unattended
         if not confirmed:
-            confirmed = ask_acquisition_confirmation(preview.destination_path)
+            confirmed = ask_acquisition_confirmation(preview, preview.destination_path, device_name=dev.display_name)
 
         if not confirmed:
             print("[*] Acquisition cancelled by user. No files were copied.")
             return
 
         # 7. Safe File Acquisition
-        print(f"\n[*] Starting forensic acquisition into: {preview.destination_path}")
-        last_print = [0.0]
+        # Verify connection right before acquisition starts
+        if not executor.is_device_connected(dev.serial):
+            print(format_actionable_error(ERR_DEVICE_DISCONNECTED, device_name=dev.display_name))
+            return
 
-        def acq_progress(
-            completed: int,
-            remaining: int,
-            trans_b: int,
-            tot_b: int,
-            cur_fn: str,
-            stat: str,
-            elapsed: float,
-        ) -> None:
-            now = time.time()
-            if now - last_print[0] > 0.1 or remaining == 0:
-                last_print[0] = now
-                speed = trans_b / elapsed if elapsed > 0 else 0
-                pct = (trans_b / tot_b * 100) if tot_b > 0 else 0
-                fn_trunc = cur_fn[:25] + "..." if len(cur_fn) > 28 else cur_fn
-                sys.stdout.write(
-                    f"\r    [{pct:5.1f}%] Completed: {completed} | Remaining: {remaining} | "
-                    f"Speed: {format_bytes(int(speed))}/s | Status: {stat:<8} | File: {fn_trunc:<28}"
-                )
-                sys.stdout.flush()
+        print_screen_header("FILE ACQUISITION IN PROGRESS", dev, cfg)
+        print(f"DEVICE       : {dev.display_name}")
+        print(f"PHASE        : FILE ACQUISITION")
+        print(f"TOTAL FILES  : {preview.total_files}")
+        print(f"TOTAL BYTES  : {format_bytes(preview.total_bytes)}")
+        print(f"DESTINATION  : {preview.destination_path}")
+        print("-" * 65)
+
+        acq_cb = make_acquisition_progress_callback(dev.display_name, preview.total_files, progress_enabled)
 
         try:
             records = acq_manager.acquire_files(
@@ -449,21 +837,25 @@ def run_interactive_workflow(
                 scan_result=scan_result,
                 destination_dir=preview.destination_path,
                 selected_categories=selected_cats,
-                progress_cb=acq_progress,
+                progress_cb=acq_cb,
                 excluded_paths=excluded_paths,
                 scan_id=preview.scan_id,
             )
             print("\n[+] Acquisition phase finished.")
         except KeyboardInterrupt:
-            print("\n[!] Acquisition interrupted! Partial progress and manifest preserved safely.")
+            print(format_actionable_error(ERR_TRANSFER_INTERRUPTED, device_name=dev.display_name))
             return
+
+        # Check if disconnected during acquisition
+        interrupted_file = preview.destination_path / "metadata" / "interrupted.json"
+        if interrupted_file.exists():
+            print(format_actionable_error(ERR_DEVICE_DISCONNECTED, context="Acquisition session was interrupted due to device disconnection.", device_name=dev.display_name))
 
         # 8. Post-Acquisition Analysis & Chat Reconstruction
         dest_tree = acq_manager.setup_recovery_tree(preview.destination_path)
         analyzed_dbs = []
         conversations = []
 
-        # Check for acquired databases
         db_dir = dest_tree.get("Databases", preview.destination_path / "Databases")
         if db_dir.exists():
             for db_file in db_dir.glob("*"):
@@ -471,12 +863,10 @@ def run_interactive_workflow(
                     db_meta = WhatsAppDatabaseAnalyzer.identify_database(db_file)
                     analyzed_dbs.append(db_meta)
 
-                    # If SQLite, attempt chat extraction
                     if db_meta.is_sqlite and db_meta.table_count > 0:
                         raw_msgs = WhatsAppDatabaseAnalyzer.extract_raw_messages(db_file)
                         if raw_msgs:
                             convs = ChatReconstructionEngine.reconstruct_conversations(raw_msgs)
-                            # Associate media
                             all_acquired = [
                                 p for root, _, files in os.walk(preview.destination_path)
                                 for p in [Path(root) / fn for fn in files]
@@ -484,7 +874,6 @@ def run_interactive_workflow(
                             MediaAssociator.associate_media(convs, all_acquired)
                             conversations.extend(convs)
 
-                            # Export chats automatically
                             chats_dir = preview.destination_path / "chats"
                             for c in convs:
                                 safe_conv_name = sanitize_filename(c.display_name)[:30]
@@ -506,18 +895,19 @@ def run_interactive_workflow(
 
         # 10. Summary
         verified_cnt = sum(1 for r in records if r.status == STATUS_VERIFIED)
-        print("\n" + "=" * 72)
+        print("\n" + "=" * 65)
         print("  ACQUISITION SUMMARY")
-        print("=" * 72)
-        print(f"  Target Destination : {preview.destination_path}")
-        print(f"  Total Acquired     : {len(records)} files")
-        print(f"  SHA-256 Verified   : {verified_cnt} files")
+        print("=" * 65)
+        print(f"  Device              : {dev.display_name}")
+        print(f"  Target Destination  : {preview.destination_path}")
+        print(f"  Total Acquired      : {len(records)} files")
+        print(f"  SHA-256 Verified    : {verified_cnt} files")
         if conversations:
-            print(f"  Chats Reconstructed: {len(conversations)} conversations")
-        print(f"  HTML Report        : {h}")
-        print(f"  CSV Report         : {c}")
-        print(f"  JSON Report        : {j}")
-        print("=" * 72 + "\n")
+            print(f"  Chats Reconstructed : {len(conversations)} conversations")
+        print(f"  HTML Report         : {h}")
+        print(f"  CSV Report          : {c}")
+        print(f"  JSON Report         : {j}")
+        print("=" * 65 + "\n")
 
 
 def show_recovery_info() -> None:
@@ -556,17 +946,24 @@ def show_recovery_info() -> None:
     print("=" * 72 + "\n")
 
 
-def inspect_target(target: Path, key_path: Optional[Path] = None) -> None:
+def inspect_target(
+    target: Path,
+    key_path: Optional[Path] = None,
+    device_name: Optional[str] = None,
+) -> None:
     """Inspect an acquired WhatsApp database or recovery folder."""
     target = target.resolve()
     if not target.exists():
         print(f"[!] Target path does not exist: {target}")
         return
 
+    dev_label = device_name or "Recovery Case"
+
     if target.is_dir():
-        print("\n" + "=" * 72)
+        print("\n" + "=" * 65)
         print(f"  INSPECTING RECOVERY DIRECTORY: {target.name}")
-        print("=" * 72)
+        print("=" * 65)
+        print(f"  Selected Device    : {dev_label}")
         manifest_p = target / "metadata" / "acquisition_manifest.json"
         if manifest_p.exists():
             audit = verify_recovery_directory(target)
@@ -580,7 +977,6 @@ def inspect_target(target: Path, key_path: Optional[Path] = None) -> None:
         else:
             print("  [!] No acquisition_manifest.json found in directory metadata.")
 
-        # Check for databases in Databases/ subfolder or root
         db_candidates = list(target.glob("Databases/*")) + list(target.glob("*.db*"))
         db_files = [f for f in db_candidates if f.is_file() and not f.name.endswith("-journal") and not f.name.endswith("-wal")]
         if db_files:
@@ -589,13 +985,14 @@ def inspect_target(target: Path, key_path: Optional[Path] = None) -> None:
                 meta = WhatsAppDatabaseAnalyzer.identify_database(df)
                 enc_str = f"Encrypted ({meta.crypt_version})" if meta.is_encrypted else ("SQLite" if meta.is_sqlite else "Unknown")
                 print(f"   • {df.name:<32} {format_bytes(meta.size_bytes):>10}  Format: {enc_str}")
-        print("=" * 72 + "\n")
+        print("=" * 65 + "\n")
         return
 
     # Target is a file
-    print("\n" + "=" * 72)
+    print("\n" + "=" * 65)
     print(f"  INSPECTING DATABASE FILE: {target.name}")
-    print("=" * 72)
+    print("=" * 65)
+    print(f"  Selected Device    : {dev_label}")
     meta = WhatsAppDatabaseAnalyzer.identify_database(target)
     print(f"  File Name          : {meta.file_path.name}")
     print(f"  Path               : {meta.file_path}")
@@ -637,17 +1034,189 @@ def inspect_target(target: Path, key_path: Optional[Path] = None) -> None:
         else:
             print(f"[!] Decryption failed: {msg}")
 
-    print("=" * 72 + "\n")
+    print("=" * 65 + "\n")
 
 
-def inspect_recovery_folder_interactive() -> None:
+def inspect_recovery_folder_interactive(device: Optional[DeviceInfo] = None) -> None:
     """Inspect and display metadata of an existing recovery folder."""
     target_str = input("Enter path to recovery directory or database file: ").strip()
     if not target_str:
         return
     key_str = input("Enter path to decryption key (optional, press Enter to skip): ").strip()
     key_p = Path(key_str).resolve() if key_str else None
-    inspect_target(Path(target_str), key_path=key_p)
+    dev_name = device.display_name if device else None
+    inspect_target(Path(target_str), key_path=key_p, device_name=dev_name)
+
+
+def verify_acquired_files_interactive(
+    device: Optional[DeviceInfo] = None,
+    settings: Optional[dict[str, Any]] = None,
+) -> None:
+    """Interactive integrity verification screen for acquired files (Option 4)."""
+    print_screen_header("INTEGRITY VERIFICATION", device, settings)
+    path_input = input("Enter recovery directory path to verify: ").strip()
+    if not path_input:
+        return
+
+    rec_path = Path(path_input).resolve()
+    if not rec_path.exists():
+        print(f"[!] Path does not exist: {rec_path}")
+        return
+
+    print(f"\n[*] Verifying cryptographic SHA-256 hashes against manifest: {rec_path.name}...")
+    res = verify_recovery_directory(rec_path)
+    if not res.get("success"):
+        print(f"[!] Verification could not be completed: {res.get('error')}")
+        return
+
+    # Check device recorded in manifest if available
+    dev_recorded = res.get("device_name") or (device.display_name if device else "Recorded Device")
+
+    print("\n" + "=" * 65)
+    print("  INTEGRITY VERIFICATION RESULT")
+    print("=" * 65)
+    print(f"  Device              : {dev_recorded}")
+    print(f"  Recovery Path       : {rec_path}")
+    print(f"  Total Checked Files : {res['total']}")
+    print(f"  Cryptographically OK: {res['verified_count']}")
+    print(f"  Hash Mismatches     : {res['mismatch_count']}")
+    print(f"  Missing Acquired    : {res['missing_count']}")
+    status_label = "PASSED — FULLY INTACT" if res["is_fully_intact"] else "FAILED — INTEGRITY WARNINGS DETECTED"
+    print(f"  Status Assessment   : {status_label}")
+    print("=" * 65 + "\n")
+
+
+def review_database_candidates_interactive(
+    device: Optional[DeviceInfo] = None,
+    settings: Optional[dict[str, Any]] = None,
+) -> None:
+    """Interactive database candidate reviewer and inspector (Option 6)."""
+    print_screen_header("REVIEW DATABASE CANDIDATES", device, settings)
+    base_dir_input = input("Enter recovery folder path to inspect (default: ./recovery): ").strip()
+    base_dir = Path(base_dir_input).resolve() if base_dir_input else Path("recovery").resolve()
+
+    if not base_dir.exists():
+        print(f"[!] Directory not found: {base_dir}")
+        return
+
+    # Find database candidates (*.db, *.db.crypt*)
+    db_files: List[Path] = []
+    for root, _, files in os.walk(base_dir):
+        for f in files:
+            if (f.endswith(".db") or ".crypt" in f) and not f.endswith("-journal") and not f.endswith("-wal"):
+                db_files.append(Path(root) / f)
+
+    if not db_files:
+        print(f"[*] No database candidate files found in: {base_dir}")
+        return
+
+    print(f"\nFound {len(db_files)} database candidate(s):\n")
+    print(f"  {'#':<4} {'FILE NAME':<34} {'SIZE':>10}  {'FORMAT / CRYPT':<22}")
+    print("  " + "-" * 72)
+
+    metas = []
+    for idx, df in enumerate(db_files, start=1):
+        meta = WhatsAppDatabaseAnalyzer.identify_database(df)
+        metas.append(meta)
+        enc_str = f"Encrypted ({meta.crypt_version})" if meta.is_encrypted else ("SQLite Database" if meta.is_sqlite else "Unknown")
+        print(f"  [{idx:<2}] {df.name:<34} {format_bytes(meta.size_bytes):>10}  {enc_str:<22}")
+
+    print("\nOptions:")
+    print("  [1-N] Inspect specific database file")
+    print("  [c]   Return to main menu")
+
+    choice = input("\nEnter choice: ").strip().lower()
+    if choice == "c" or not choice:
+        return
+
+    try:
+        idx = int(choice)
+        if 1 <= idx <= len(db_files):
+            chosen_file = db_files[idx - 1]
+            key_in = input("Enter path to decryption key (leave blank if unencrypted or unavailable): ").strip()
+            key_p = Path(key_in).resolve() if key_in else None
+            inspect_target(chosen_file, key_path=key_p, device_name=device.display_name if device else None)
+    except ValueError:
+        print("Invalid choice.")
+
+
+def export_and_package_menu_interactive(device: Optional[DeviceInfo] = None) -> None:
+    """Submenu for chat export and ZIP archive packaging (Option 5)."""
+    print_screen_header("EXPORT REPORTS & ARCHIVE", device)
+    print("  [1] Reconstruct and export conversations from database (HTML, JSON, CSV, TXT)")
+    print("  [2] Package recovery directory into verified ZIP archive")
+    print("  [3] Return to main menu")
+
+    choice = input("\nEnter choice [1-3]: ").strip()
+    if choice == "1":
+        reconstruct_and_export_interactive()
+    elif choice == "2":
+        package_zip_interactive()
+
+
+def settings_menu_interactive(settings: dict[str, Any]) -> None:
+    """Interactive persistent configuration editor (Option 7)."""
+    while True:
+        ui = settings.setdefault("ui", {})
+        acq = settings.setdefault("acquisition", {})
+
+        mask_enabled = ui.get("mask_device_serial", False)
+        prog_enabled = ui.get("progress_display_enabled", True)
+        rec_dir = acq.get("default_recovery_dir", "recovery")
+        margin_b = acq.get("safety_margin_bytes", 104857600)
+        margin_r = acq.get("safety_margin_ratio", 0.10)
+
+        print("\n" + "=" * 65)
+        print("  WRS — SETTINGS & PERSISTENT CONFIGURATION")
+        print("=" * 65)
+        print(f"  [1] Device Serial Masking       : {'ENABLED' if mask_enabled else 'DISABLED'}")
+        print(f"  [2] Scan Progress Display       : {'ENABLED' if prog_enabled else 'DISABLED'}")
+        print(f"  [3] Default Recovery Directory  : {rec_dir}")
+        print(f"  [4] Safety Margin Bytes         : {format_bytes(margin_b)} ({margin_b} bytes)")
+        print(f"  [5] Safety Margin Ratio         : {int(margin_r * 100)}%")
+        print("  [6] Reset Settings to Safe Defaults")
+        print("  [7] Return to Main Menu")
+        print("-" * 65)
+
+        opt = input("\nEnter option [1-7]: ").strip()
+        if opt == "1":
+            ui["mask_device_serial"] = not mask_enabled
+            save_settings(settings)
+            print(f"[+] Device serial masking is now: {'ENABLED' if ui['mask_device_serial'] else 'DISABLED'}")
+        elif opt == "2":
+            ui["progress_display_enabled"] = not prog_enabled
+            save_settings(settings)
+            print(f"[+] Progress display is now: {'ENABLED' if ui['progress_display_enabled'] else 'DISABLED'}")
+        elif opt == "3":
+            new_dir = input(f"Enter new default recovery directory [{rec_dir}]: ").strip()
+            if new_dir:
+                acq["default_recovery_dir"] = new_dir
+                save_settings(settings)
+                print(f"[+] Default recovery directory set to: {new_dir}")
+        elif opt == "4":
+            new_mb = input(f"Enter safety margin in megabytes (MB) [{margin_b // 1048576}]: ").strip()
+            if new_mb.isdigit() and int(new_mb) >= 0:
+                acq["safety_margin_bytes"] = int(new_mb) * 1048576
+                save_settings(settings)
+                print(f"[+] Safety margin set to: {format_bytes(acq['safety_margin_bytes'])}")
+        elif opt == "5":
+            new_ratio = input(f"Enter safety margin percentage (0-50) [{int(margin_r * 100)}]: ").strip()
+            if new_ratio.isdigit() and 0 <= int(new_ratio) <= 50:
+                acq["safety_margin_ratio"] = int(new_ratio) / 100.0
+                save_settings(settings)
+                print(f"[+] Safety margin ratio set to: {int(acq['safety_margin_ratio'] * 100)}%")
+        elif opt == "6":
+            ui["mask_device_serial"] = False
+            ui["progress_display_enabled"] = True
+            acq["default_recovery_dir"] = "recovery"
+            acq["safety_margin_bytes"] = 104857600
+            acq["safety_margin_ratio"] = 0.10
+            save_settings(settings)
+            print("[+] Settings reset to factory defaults.")
+        elif opt == "7" or opt.lower() == "c":
+            return
+        else:
+            print("Invalid option.")
 
 
 def reconstruct_and_export_interactive() -> None:
@@ -726,76 +1295,6 @@ def package_zip_interactive() -> None:
         print(f"[!] Archive creation failed: {err}")
 
 
-def view_case_audit_interactive() -> None:
-    """Interactive viewer for local case management and append-only audit events."""
-    base_rec = Path("recovery").resolve()
-    scans = CaseManager.list_past_scans(base_rec)
-
-    print("\n" + "=" * 72)
-    print("  WRS CASE MANAGEMENT & AUDIT LOGS")
-    print("=" * 72)
-
-    if not scans:
-        print("  No past recovery cases found in recovery directory.")
-        print("=" * 72 + "\n")
-        return
-
-    print(f"  Found {len(scans)} recovery case(s):\n")
-    for idx, s in enumerate(scans, start=1):
-        dev = s.get("device_name", "Unknown")
-        dt = s.get("timestamp", "Unknown")
-        fc = s.get("total_files", 0)
-        sz = format_bytes(s.get("total_bytes", 0))
-        sid = s.get("scan_id", "N/A")
-        print(f"  [{idx}] {sid:<24} | Device: {dev:<18} | Date: {dt} | {fc} files ({sz})")
-
-    print("\nOptions:")
-    print("  [1] View audit events for a scan")
-    print("  [2] Compare two scans")
-    print("  [3] Return to main menu")
-
-    opt = input("\nEnter option [1-3]: ").strip()
-    if opt == "1":
-        choice = input("Enter case number to view: ").strip()
-        try:
-            c_idx = int(choice) - 1
-            if 0 <= c_idx < len(scans):
-                selected = scans[c_idx]
-                case_dir = selected["recovery_path"]
-                cm = CaseManager(selected.get("scan_id", "unknown"), case_dir)
-                events = cm.load_events()
-                print(f"\n--- Audit Events for Scan: {selected.get('scan_id')} ---")
-                if not events:
-                    print("  No audit events recorded for this scan.")
-                for ev in events:
-                    print(f"  [{ev.timestamp}] {ev.event_type:<24} {ev.details}")
-                print("-" * 60)
-        except (ValueError, IndexError):
-            print("Invalid case number.")
-    elif opt == "2":
-        if len(scans) < 2:
-            print("At least two scans are required to perform a comparison.")
-            return
-        c1 = input("Enter first case number: ").strip()
-        c2 = input("Enter second case number: ").strip()
-        try:
-            s1 = scans[int(c1) - 1]["recovery_path"]
-            s2 = scans[int(c2) - 1]["recovery_path"]
-            comp = CaseManager.compare_cases(s1, s2)
-            print("\n" + "=" * 60)
-            print("  CASE COMPARISON RESULT")
-            print("=" * 60)
-            print(f"  Case 1 Files       : {comp['case1_total']}")
-            print(f"  Case 2 Files       : {comp['case2_total']}")
-            print(f"  Common Identical   : {comp['common_identical_count']}")
-            print(f"  Files Unique to 1  : {comp['unique_to_case1_count']}")
-            print(f"  Files Unique to 2  : {comp['unique_to_case2_count']}")
-            print(f"  Content Alterations: {comp['modified_content_count']}")
-            print("=" * 60)
-        except (ValueError, IndexError):
-            print("Invalid case numbers.")
-
-
 def export_target(
     target: Path,
     export_format: str = "all",
@@ -810,7 +1309,6 @@ def export_target(
 
     export_format = export_format.lower()
 
-    # If ZIP packaging is explicitly chosen and target is a directory
     if export_format == "zip" and target.is_dir():
         out_zip = output_dir if (output_dir and str(output_dir).endswith(".zip")) else (target.parent / f"{target.name}_export.zip")
         print(f"[*] Packaging directory into ZIP archive: {out_zip}")
@@ -822,7 +1320,6 @@ def export_target(
             print(f"[!] ZIP packaging failed: {err}")
             sys.exit(1)
 
-    # Database file or directory containing database
     db_file: Optional[Path] = None
     media_dir: Optional[Path] = None
 
@@ -830,7 +1327,6 @@ def export_target(
         db_file = target
         media_dir = target.parent
     else:
-        # Look for SQLite or crypt DB in Databases/ or root
         candidates = list(target.glob("Databases/*")) + list(target.glob("*.db*"))
         for c in candidates:
             if c.is_file() and not c.name.endswith("-journal") and not c.name.endswith("-wal"):
@@ -865,7 +1361,6 @@ def export_target(
     convs = ChatReconstructionEngine.reconstruct_conversations(raw_msgs)
     print(f"[+] Reconstructed {len(convs)} conversation threads ({len(raw_msgs)} messages).")
 
-    # Associate media
     if media_dir and media_dir.exists():
         media_files = [p for root, _, files in os.walk(media_dir) for p in [Path(root) / fn for fn in files]]
         MediaAssociator.associate_media(convs, media_files)
@@ -894,49 +1389,104 @@ def export_target(
 
 
 def interactive_menu() -> None:
-    """Main terminal menu loop."""
+    """Main terminal menu loop with startup preflight and 9-option dispatcher."""
     executor = AdbExecutor()
+    settings = load_settings()
+
+    # Preflight Check & Device Detection
+    all_devs, selected_dev = detect_and_display_startup_devices(executor, settings)
+
+    # If 0 devices connected, offer retry or continue
+    if not all_devs:
+        while not all_devs:
+            try:
+                prompt_act = input("Select [R] to Retry device detection, or [Q] to Exit: ").strip().lower()
+                if prompt_act == "q":
+                    print("\nExiting WRS. Goodbye.")
+                    sys.exit(0)
+                elif prompt_act == "r":
+                    executor.clear_cache()
+                    all_devs, selected_dev = detect_and_display_startup_devices(executor, settings)
+                else:
+                    print("Invalid choice. Press 'R' to retry detection or 'Q' to exit.")
+            except (KeyboardInterrupt, EOFError):
+                print("\nExiting WRS.")
+                sys.exit(0)
 
     while True:
-        print_banner(executor)
-        print("[1] Scan Android device and discover WhatsApp data (Inventory Only)")
-        print("[2] Scan and acquire WhatsApp data")
-        print("[3] Inspect recovery folder or SQLite database")
-        print("[4] Verify acquired files and hashes")
-        print("[5] Reconstruct and export chats from acquired database")
-        print("[6] Package recovery directory into ZIP archive")
-        print("[7] View case audit log and past scans")
-        print("[8] View supported recovery locations and limitations")
+        # Keep selected device name visible at top of main menu
+        mask = settings.get("ui", {}).get("mask_device_serial", False)
+        dev_title = "None"
+        if selected_dev:
+            s_disp = selected_dev.get_display_serial(masked=mask)
+            dev_title = f"{selected_dev.display_name} ({s_disp})" if s_disp else selected_dev.display_name
+
+        print("\n" + "=" * 65)
+        print("          WRS — WHATSAPP RECOVERY SCANNER")
+        print("=" * 65)
+        print(f"Selected Device: {dev_title}\n")
+        print("[1] Scan and discover WhatsApp data")
+        print("[2] Scan and acquire data")
+        print("[3] Inspect an existing recovery case")
+        print("[4] Verify acquired files")
+        print("[5] Export reports and ZIP archive")
+        print("[6] Review database candidates")
+        print("[7] Settings and configuration")
+        print("[8] Refresh connected devices")
         print("[9] Exit")
+        print("=" * 65)
 
         try:
             choice = input("\nEnter choice [1-9]: ").strip()
             if choice == "1":
-                run_interactive_workflow(executor, acquire_mode=False)
+                if not selected_dev or not selected_dev.is_accessible:
+                    print("[!] No accessible Android device selected. Attempting device detection...")
+                    _, selected_dev = detect_and_display_startup_devices(executor, settings)
+                    if not selected_dev or not selected_dev.is_accessible:
+                        print("[!] Cannot start scan: Device is not authorized or offline.")
+                        continue
+                run_interactive_workflow(executor, acquire_mode=False, override_serial=selected_dev.serial, settings=settings)
+
             elif choice == "2":
-                run_interactive_workflow(executor, acquire_mode=True)
+                if not selected_dev or not selected_dev.is_accessible:
+                    print("[!] No accessible Android device selected. Attempting device detection...")
+                    _, selected_dev = detect_and_display_startup_devices(executor, settings)
+                    if not selected_dev or not selected_dev.is_accessible:
+                        print("[!] Cannot start acquisition: Device is not authorized or offline.")
+                        continue
+                run_interactive_workflow(executor, acquire_mode=True, override_serial=selected_dev.serial, settings=settings)
+
             elif choice == "3":
-                inspect_recovery_folder_interactive()
+                inspect_recovery_folder_interactive(selected_dev)
+
             elif choice == "4":
-                path_input = input("Enter recovery directory path to verify: ").strip()
-                if path_input:
-                    res = verify_recovery_directory(path_input)
-                    print(f"Verification result: {res['verified_count']}/{res['total']} intact.")
+                verify_acquired_files_interactive(selected_dev, settings)
+
             elif choice == "5":
-                reconstruct_and_export_interactive()
+                export_and_package_menu_interactive(selected_dev)
+
             elif choice == "6":
-                package_zip_interactive()
+                review_database_candidates_interactive(selected_dev, settings)
+
             elif choice == "7":
-                view_case_audit_interactive()
+                settings_menu_interactive(settings)
+
             elif choice == "8":
-                show_recovery_info()
+                print("\n[*] Refreshing connected Android devices...")
+                executor.clear_cache()
+                all_devs, selected_dev = detect_and_display_startup_devices(executor, settings)
+
             elif choice == "9":
                 print("\nExiting WRS. Goodbye.")
                 sys.exit(0)
+
             else:
-                print("Invalid choice.")
+                print("Invalid choice. Please select a number from 1 to 9.")
+
         except KeyboardInterrupt:
-            print("\nOperation cancelled.")
+            print("\nOperation cancelled. Returning to main menu...")
+        except EOFError:
+            print("\nExiting WRS. Goodbye.")
             sys.exit(0)
 
         input("\nPress Enter to return to main menu...")
@@ -974,7 +1524,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run without interactive confirmation prompts (requires explicit --acquire and scope)",
     )
-    parser.add_argument("--dry-run", action="store_true", help="Simulate acquisition without pulling files")
+    parser.add_argument("--dry-run", action="store_true", help="Simulate acquisition inventory without copying files")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose debug logging")
 
     return parser.parse_args()
@@ -990,11 +1540,12 @@ def main() -> None:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     executor = AdbExecutor()
+    settings = load_settings()
     key_path = Path(args.key).resolve() if args.key else None
 
     # 1. Standalone verification mode
     if args.verify:
-        print_banner(executor)
+        print_banner(executor, settings=settings)
         print(f"[*] Verifying recovery directory: {args.verify}")
         res = verify_recovery_directory(args.verify)
         if not res.get("success"):
@@ -1008,30 +1559,24 @@ def main() -> None:
 
     # 2. Inspect mode
     if args.inspect:
-        print_banner(executor)
+        print_banner(executor, settings=settings)
         inspect_target(Path(args.inspect), key_path=key_path)
         sys.exit(0)
 
     # 3. Export mode
     if args.export:
-        print_banner(executor)
+        print_banner(executor, settings=settings)
         out_dir = Path(args.output).resolve() if args.output else None
         export_target(Path(args.export), export_format=args.format or "all", key_path=key_path, output_dir=out_dir)
         sys.exit(0)
 
     # 4. List devices mode
     if args.list_devices:
-        devices = executor.list_devices()
-        print("\n--- Connected Android Devices ---")
-        if not devices:
-            print("No devices attached.")
-            sys.exit(0)
-        for d in devices:
-            print(f"Serial: {d.serial:<20} State: {d.state:<12} Model: {d.display_name}")
+        detect_and_display_startup_devices(executor, settings)
         sys.exit(0)
 
-    # 5. Headless / CLI scan or acquire mode
-    if args.scan or args.acquire:
+    # 5. Headless / CLI scan, acquire, or dry-run mode
+    if args.scan or args.acquire or args.dry_run:
         out_path = Path(args.output).resolve() if args.output else None
         selected_cats: Optional[Set[str]] = None
         if args.categories:
@@ -1046,6 +1591,8 @@ def main() -> None:
             selected_cats=selected_cats,
             exclude_duplicates=args.exclude_duplicates,
             key_path=key_path,
+            dry_run=args.dry_run,
+            settings=settings,
         )
         sys.exit(0)
 
@@ -1055,4 +1602,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

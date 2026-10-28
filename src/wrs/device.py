@@ -76,19 +76,66 @@ class DeviceInfo:
 
     @property
     def display_name(self) -> str:
-        """Formatted human-readable device name."""
-        if self.manufacturer != "Unknown" and self.model != "Unknown":
-            return f"{self.manufacturer} {self.model}"
-        if self.model != "Unknown":
-            return self.model
-        if self.product_name:
-            return self.product_name
-        return f"Device ({self.serial})"
+        """Formatted human-readable device name based on priority:
+        1. Manufacturer and model.
+        2. Product or device model if reported model is unavailable.
+        3. Neutral fallback: Android Device (<serial suffix>).
+        """
+        mfg = self.manufacturer.strip() if self.manufacturer else ""
+        mdl = self.model.strip() if self.model else ""
+        prod = self.product_name.strip() if self.product_name else ""
+        code = self.device_codename.strip() if self.device_codename else ""
+
+        if mfg and mfg.lower() != "unknown" and mdl and mdl.lower() != "unknown":
+            if mdl.lower().startswith(mfg.lower()):
+                return mdl
+            return f"{mfg} {mdl}"
+        if mdl and mdl.lower() != "unknown":
+            return mdl
+        if prod and prod.lower() != "unknown":
+            return prod
+        if code and code.lower() != "unknown":
+            return code
+
+        suffix = self.serial[-6:] if len(self.serial) > 6 else self.serial
+        return f"Android Device ({suffix})"
+
+    @property
+    def is_authorized(self) -> bool:
+        """Whether the device has granted USB debugging authorization."""
+        return self.state.lower() in ("device", "authorized")
+
+    @property
+    def status_display(self) -> str:
+        """Human-readable connection status indicator."""
+        st = self.state.lower()
+        if st in ("device", "authorized"):
+            return "CONNECTED / AUTHORIZED"
+        if st == "unauthorized":
+            return "UNAUTHORIZED"
+        if st == "offline":
+            return "OFFLINE"
+        if st in ("disconnected", "unavailable"):
+            return "DISCONNECTED"
+        return "UNKNOWN"
+
+    def get_display_serial(self, masked: bool = False) -> str:
+        """Return raw or masked serial string for display."""
+        if not masked or not self.serial:
+            return self.serial
+        clean = self.serial.strip()
+        if len(clean) <= 6:
+            return "****" + clean[-2:]
+        return f"{clean[:4]}****{clean[-4:]}"
 
     @property
     def is_accessible(self) -> bool:
         """Whether the device is in ready state for scanning."""
-        return self.state == "device" and self.internal_storage_accessible
+        if not self.is_authorized:
+            return False
+        if self.state in ("unauthorized", "offline", "unavailable"):
+            return False
+        return True
 
 
 class AdbExecutor:
@@ -101,6 +148,7 @@ class AdbExecutor:
     ) -> None:
         self.adb_path = adb_path or shutil.which("adb") or "/usr/bin/adb"
         self._runner = runner or subprocess.run
+        self._device_cache: dict[str, DeviceInfo] = {}
 
     def is_adb_installed(self) -> bool:
         """Check if ADB executable exists on system."""
@@ -221,8 +269,17 @@ class AdbExecutor:
 
         return devices
 
-    def get_device_details(self, serial: str) -> DeviceInfo:
+    def clear_cache(self) -> None:
+        """Clear cached session device metadata."""
+        self._device_cache.clear()
+
+    def get_device_details(self, serial: str, refresh: bool = False) -> DeviceInfo:
         """Inspect detailed hardware, OS, root, storage, and screen lock properties."""
+        if not refresh and serial in self._device_cache:
+            cached = self._device_cache[serial]
+            if self.is_device_connected(serial):
+                return cached
+
         # First query device list to get baseline state
         devices = self.list_devices()
         dev: Optional[DeviceInfo] = next((d for d in devices if d.serial == serial), None)
@@ -235,6 +292,7 @@ class AdbExecutor:
             )
 
         if dev.state != "device":
+            self._device_cache[serial] = dev
             return dev
 
         # 1. Hardware & OS properties
@@ -243,6 +301,7 @@ class AdbExecutor:
             serial=serial,
             timeout=15,
         )
+        props = {}
         if props_cmd.returncode == 0:
             props = self._parse_getprop(props_cmd.stdout)
             dev.manufacturer = props.get("ro.product.manufacturer", dev.manufacturer).strip().title()
@@ -251,6 +310,24 @@ class AdbExecutor:
             dev.sdk_version = props.get("ro.build.version.sdk", dev.sdk_version).strip()
             dev.product_name = props.get("ro.product.name", dev.product_name).strip()
             dev.device_codename = props.get("ro.product.device", dev.device_codename).strip()
+
+        # Query individual getprop properties if core attributes remain Unknown
+        if dev.manufacturer == "Unknown":
+            res_m = self.run_cmd(["shell", "getprop", "ro.product.manufacturer"], serial=serial, timeout=5)
+            if res_m.returncode == 0 and res_m.stdout.strip():
+                dev.manufacturer = res_m.stdout.strip().title()
+        if dev.model == "Unknown":
+            res_mdl = self.run_cmd(["shell", "getprop", "ro.product.model"], serial=serial, timeout=5)
+            if res_mdl.returncode == 0 and res_mdl.stdout.strip():
+                dev.model = res_mdl.stdout.strip()
+        if dev.android_version == "Unknown":
+            res_av = self.run_cmd(["shell", "getprop", "ro.build.version.release"], serial=serial, timeout=5)
+            if res_av.returncode == 0 and res_av.stdout.strip():
+                dev.android_version = res_av.stdout.strip()
+        if dev.sdk_version == "Unknown":
+            res_sdk = self.run_cmd(["shell", "getprop", "ro.build.version.sdk"], serial=serial, timeout=5)
+            if res_sdk.returncode == 0 and res_sdk.stdout.strip():
+                dev.sdk_version = res_sdk.stdout.strip()
 
         # 2. Storage Accessibility
         # Test internal shared storage
@@ -292,12 +369,21 @@ class AdbExecutor:
         # 5. Stable non-secret device identifier
         dev.device_id = generate_device_identifier(dev.manufacturer, dev.model, dev.serial)
 
+        self._device_cache[serial] = dev
         return dev
 
     def is_device_connected(self, serial: str) -> bool:
         """Verify whether the device remains attached and responsive."""
         res = self.run_cmd(["get-state"], serial=serial, timeout=5)
-        return res.returncode == 0 and "device" in res.stdout
+        if res.returncode != 0:
+            return False
+        err_lower = (res.stderr or "").lower()
+        out_lower = (res.stdout or "").lower()
+        if any(term in err_lower or term in out_lower for term in ["offline", "not found", "disconnected", "unauthorized", "closed"]):
+            return False
+        if out_lower:
+            return "device" in out_lower
+        return True
 
     def _parse_getprop(self, output: str) -> dict[str, str]:
         """Parse getprop bracketed format: [key]: [value]."""

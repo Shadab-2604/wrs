@@ -1,6 +1,14 @@
 {
   "app_name": "WRS — WhatsApp Recovery Scanner",
-  "version": "1.0.0",
+  "version": "2.0.0",
+  "ui": {
+    "mask_device_serial": false,
+    "progress_display_enabled": true,
+    "use_rich_formatting": true
+  },
+  "reporting": {
+    "preferred_report_formats": ["html", "json", "csv"]
+  },
   "storage": {
     "target_paths": [
       "/sdcard/Android/media/com.whatsapp/WhatsApp/",

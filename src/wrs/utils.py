@@ -210,11 +210,68 @@ def check_disk_space(
         return False, free_bytes, total_required, msg
 
 
+def mask_serial(serial: str) -> str:
+    """Mask serial identifier for privacy in ordinary terminal displays.
+
+    Example: '28241FDH2006G7' -> '2824****06G7'
+    """
+    if not serial:
+        return ""
+    clean = serial.strip()
+    if len(clean) <= 6:
+        return "****" + clean[-2:]
+    return f"{clean[:4]}****{clean[-4:]}"
+
+
+def validate_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    """Validate configuration settings, sanitizing invalid types and falling back to safe defaults.
+
+    Never permits storing passwords, private keys, or authentication material.
+    """
+    validated = dict(settings)
+
+    # 1. Strip prohibited sensitive fields if present
+    prohibited_keys = {"password", "token", "secret", "private_key", "key", "auth"}
+    for k in list(validated.keys()):
+        if any(p in k.lower() for p in prohibited_keys):
+            del validated[k]
+
+    # 2. UI section
+    ui = validated.setdefault("ui", {})
+    if not isinstance(ui.get("mask_device_serial"), bool):
+        ui["mask_device_serial"] = False
+    if not isinstance(ui.get("progress_display_enabled"), bool):
+        ui["progress_display_enabled"] = True
+    if not isinstance(ui.get("use_rich_formatting"), bool):
+        ui["use_rich_formatting"] = True
+
+    # 3. Acquisition section
+    acq = validated.setdefault("acquisition", {})
+    if not isinstance(acq.get("default_recovery_dir"), str) or not acq["default_recovery_dir"].strip():
+        acq["default_recovery_dir"] = "recovery"
+    if not isinstance(acq.get("safety_margin_bytes"), int) or acq["safety_margin_bytes"] < 0:
+        acq["safety_margin_bytes"] = 104857600  # 100 MiB
+    if not isinstance(acq.get("safety_margin_ratio"), (int, float)) or acq["safety_margin_ratio"] < 0:
+        acq["safety_margin_ratio"] = 0.10
+
+    # 4. Reporting section
+    rep = validated.setdefault("reporting", {})
+    if not isinstance(rep.get("preferred_report_formats"), list):
+        rep["preferred_report_formats"] = ["html", "json", "csv"]
+
+    return validated
+
+
 def load_settings(config_path: Optional[Path] = None) -> dict[str, Any]:
     """Load settings from config/settings.json or fallback defaults."""
     default_settings: dict[str, Any] = {
         "app_name": "WRS — WhatsApp Recovery Scanner",
-        "version": "1.0.0",
+        "version": "2.0.0",
+        "ui": {
+            "mask_device_serial": False,
+            "progress_display_enabled": True,
+            "use_rich_formatting": True,
+        },
         "storage": {
             "target_paths": [
                 "/sdcard/Android/media/com.whatsapp/WhatsApp/",
@@ -235,6 +292,9 @@ def load_settings(config_path: Optional[Path] = None) -> dict[str, Any]:
             "adb_command_timeout_seconds": 30,
             "adb_pull_timeout_seconds": 300,
         },
+        "reporting": {
+            "preferred_report_formats": ["html", "json", "csv"],
+        },
     }
 
     if config_path is None:
@@ -253,7 +313,22 @@ def load_settings(config_path: Optional[Path] = None) -> dict[str, Any]:
                     else:
                         default_settings[k] = v
         except Exception:
-            # Fallback gracefully
             pass
 
-    return default_settings
+    return validate_settings(default_settings)
+
+
+def save_settings(settings: dict[str, Any], config_path: Optional[Path] = None) -> bool:
+    """Save validated settings dictionary to config/settings.json."""
+    if config_path is None:
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        config_path = repo_root / "config" / "settings.json"
+
+    validated = validate_settings(settings)
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(validated, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception:
+        return False
