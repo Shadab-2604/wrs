@@ -98,6 +98,15 @@ from .db_discovery import (
     DatabaseDiscoveryService,
     inspect_sqlite_chat_dates,
 )
+from .priority_discovery import (
+    DiscoveryCandidate,
+    DiscoveryLocation,
+    DiscoveryManifest,
+    PriorityDiscoveryEngine,
+    discovery_review_menu_interactive,
+    display_discovery_results_summary,
+    run_animated_priority_discovery,
+)
 
 logger = logging.getLogger("wrs.cli")
 
@@ -722,8 +731,13 @@ def run_interactive_workflow(
     key_path: Optional[Path] = None,
     dry_run: bool = False,
     settings: Optional[dict[str, Any]] = None,
+    selected_categories: Optional[Set[str]] = None,
+    discovery_manifest: Optional[DiscoveryManifest] = None,
 ) -> None:
     """Execute complete workflow: Discovery -> Inventory -> Preview -> Confirmation -> Acquisition -> Report."""
+    if selected_categories is not None and selected_cats is None:
+        selected_cats = selected_categories
+
     cfg = settings or load_settings()
     progress_enabled = bool(cfg.get("ui", {}).get("progress_display_enabled", True))
 
@@ -763,7 +777,12 @@ def run_interactive_workflow(
     print_screen_header("STORAGE DISCOVERY", dev, cfg)
     print(f"[*] Discovering WhatsApp storage on {dev.display_name} ({dev.get_display_serial()})...")
     discovery = StorageDiscovery(executor)
-    locations = discovery.discover_locations(dev)
+    custom_cands = None
+    if discovery_manifest:
+        active_paths = [loc.path for loc in discovery_manifest.locations if loc.is_selected and loc.is_device and loc.is_accessible]
+        if active_paths:
+            custom_cands = active_paths
+    locations = discovery.discover_locations(dev, custom_candidates=custom_cands)
 
     if not locations:
         print(format_actionable_error(ERR_NO_WHATSAPP_STORAGE, device_name=dev.display_name))
@@ -860,9 +879,26 @@ def run_interactive_workflow(
             # Inventory-only mode: save catalog and generate reports
             print("[*] Inventory-only scan requested. Saving scan catalog...")
             dest_tree = acq_manager.setup_recovery_tree(preview.destination_path)
-            rep_gen = ReportGenerator(dev, scan_result, output_dir=dest_tree["reports"])
+            effective_scan = scan_result
+            if selected_cats is not None:
+                filtered_files = [f for f in scan_result.files if f.category in selected_cats]
+                cat_c = {c: count for c, count in scan_result.category_counts.items() if c in selected_cats}
+                cat_b = {c: b for c, b in scan_result.category_bytes.items() if c in selected_cats}
+                effective_scan = ScanResult(
+                    device_serial=scan_result.device_serial,
+                    location_path=scan_result.location_path,
+                    start_time=scan_result.start_time,
+                    end_time=scan_result.end_time,
+                    files=filtered_files,
+                    errors=scan_result.errors,
+                    category_counts=cat_c,
+                    category_bytes=cat_b,
+                    total_files=len(filtered_files),
+                    total_bytes=sum(f.size_bytes for f in filtered_files),
+                )
+            rep_gen = ReportGenerator(dev, effective_scan, output_dir=dest_tree["reports"])
             h, c, j = rep_gen.generate_all()
-            display_scan_completed_summary(dev, scan_result, dest_tree["reports"])
+            display_scan_completed_summary(dev, effective_scan, dest_tree["reports"])
             continue
 
         # 6. Explicit Acquisition Confirmation
@@ -1495,6 +1531,7 @@ def recovery_wizard_flow(
     selected_dev: Optional[DeviceInfo],
     settings: dict[str, Any],
     active_categories: List[str],
+    discovery_manifest: Optional[DiscoveryManifest] = None,
 ) -> None:
     """Recovery Operation Selection (Phase 4, Option [1])."""
     dev_name = selected_dev.display_name if selected_dev else "NONE DETECTED"
@@ -1533,7 +1570,7 @@ def recovery_wizard_flow(
                 print("    Please connect and authorize a device, then retry.")
                 return
             cats_set = resolve_storage_categories(active_categories) if active_categories else None
-            run_interactive_workflow(executor, acquire_mode=False, override_serial=selected_dev.serial, selected_categories=cats_set, settings=settings)
+            run_interactive_workflow(executor, acquire_mode=False, override_serial=selected_dev.serial, selected_categories=cats_set, settings=settings, discovery_manifest=discovery_manifest)
             return
         elif op == "2":
             if not selected_dev or not selected_dev.is_accessible:
@@ -1541,16 +1578,16 @@ def recovery_wizard_flow(
                 print("    Please connect and authorize a device, then retry.")
                 return
             cats_set = resolve_storage_categories(active_categories) if active_categories else None
-            run_interactive_workflow(executor, acquire_mode=True, override_serial=selected_dev.serial, selected_categories=cats_set, settings=settings)
+            run_interactive_workflow(executor, acquire_mode=True, override_serial=selected_dev.serial, selected_categories=cats_set, settings=settings, discovery_manifest=discovery_manifest)
             return
         elif op == "3":
-            inspect_backups_and_databases_interactive(executor, selected_dev, settings)
+            inspect_backups_and_databases_interactive(executor, selected_dev, settings, discovery_manifest=discovery_manifest)
             return
         elif op == "4":
-            recover_chat_history_interactive(selected_dev, settings)
+            recover_chat_history_interactive(selected_dev, settings, executor=executor, discovery_manifest=discovery_manifest)
             return
         elif op == "5":
-            recover_media_interactive(selected_dev, settings, active_categories)
+            recover_media_interactive(selected_dev, settings, active_categories, discovery_manifest=discovery_manifest)
             return
         elif op == "6":
             guided_native_restore_flow(executor, selected_dev, settings)
@@ -2020,6 +2057,7 @@ def recover_chat_history_interactive(
     device: Optional[DeviceInfo],
     settings: dict[str, Any],
     executor: Optional[AdbExecutor] = None,
+    discovery_manifest: Optional[DiscoveryManifest] = None,
 ) -> None:
     """Chat History Availability Discovery & Date-Range Recovery (Option [3])."""
     dev_name = device.display_name if device else "NONE DETECTED"
@@ -2027,6 +2065,25 @@ def recover_chat_history_interactive(
     print("\n" + "=" * 56)
     print("       WRS — RECOVER CHAT HISTORY")
     print("=" * 56)
+
+    # If discovery already revealed only encrypted backups, explain clearly
+    if discovery_manifest:
+        readable_cands = [c for c in discovery_manifest.candidates if c.is_database and c.is_readable and not c.is_device]
+        enc_cands = [c for c in discovery_manifest.candidates if c.is_database and c.is_encrypted]
+        if not readable_cands and enc_cands:
+            print("[!] No readable unencrypted SQLite chat database was found in discovery results.")
+            print(f"    Discovered {len(enc_cands)} encrypted database backup candidate(s):")
+            for ec in enc_cands:
+                print(f"      • {ec.filename} ({ec.db_format or 'Encrypted'}) — {ec.path}")
+            print("\n    WhatsApp encrypts chat backups with AES-GCM (Crypt14/Crypt15).")
+            print("    A WhatsApp decryption key is required to reconstruct messages.")
+            print("\nOptions:")
+            print("  [1] Provide WhatsApp decryption key file")
+            print("  [2] Rescan discovery locations for databases")
+            print("  [0] Back to Main Menu\n")
+            act = input("Select an option [0-2]: ").strip()
+            if act in ("0", "back", ""):
+                return
 
     # 1. Automatically discover and select suitable database
     chosen_cand = select_or_discover_chat_database_interactive(
@@ -2427,9 +2484,33 @@ def view_available_chat_dates_interactive(
     settings: dict[str, Any],
     executor: Optional[AdbExecutor] = None,
     registry: Optional[ChatDatabaseRegistry] = None,
+    discovery_manifest: Optional[DiscoveryManifest] = None,
 ) -> None:
     """Chronological Available-Date Calendar & Automatic Chat Database Discovery (Option [6])."""
     exec_inst = executor or AdbExecutor()
+
+    # If discovery already revealed only encrypted backups, explain clearly
+    if discovery_manifest:
+        readable_cands = [c for c in discovery_manifest.candidates if c.is_database and c.is_readable and not c.is_device]
+        enc_cands = [c for c in discovery_manifest.candidates if c.is_database and c.is_encrypted]
+        if not readable_cands and enc_cands:
+            print("\n" + "=" * 56)
+            print("              WRS — CHAT DATE DISCOVERY")
+            print("=" * 56)
+            print("[!] No readable unencrypted SQLite chat database was found in discovery results.")
+            print(f"    Discovered {len(enc_cands)} encrypted database backup candidate(s):")
+            for ec in enc_cands:
+                print(f"      • {ec.filename} ({ec.db_format or 'Encrypted'}) — {ec.path}")
+            print("\n    To view chat dates, an unencrypted SQLite database is required.")
+            print("    Please acquire and decrypt the database first, or perform a targeted rescan.")
+            print("\nOptions:")
+            print("  [1] Targeted rescan for chat databases")
+            print("  [2] Select or import a database manually")
+            print("  [0] Back to Main Menu\n")
+            act = input("Select an option [0-2]: ").strip()
+            if act in ("0", "back", ""):
+                return
+
     while True:
         chosen_cand = select_or_discover_chat_database_interactive(
             executor=exec_inst,
@@ -2494,6 +2575,7 @@ def recover_media_interactive(
     device: Optional[DeviceInfo],
     settings: dict[str, Any],
     active_categories: List[str],
+    discovery_manifest: Optional[DiscoveryManifest] = None,
 ) -> None:
     """Recover Media and Attachments Workflow (Phase 4, Option [4])."""
     dev_name = device.display_name if device else "NONE DETECTED"
@@ -2501,14 +2583,23 @@ def recover_media_interactive(
     print("       WRS — RECOVER MEDIA AND ATTACHMENTS")
     print("=" * 56)
     print(f"Selected Device : {dev_name}\n")
-    print("Supported Media Categories:")
-    print("  • Photos and Images")
-    print("  • Videos")
-    print("  • Audio Files")
-    print("  • Voice Notes")
-    print("  • Documents and Files")
-    print("  • Stickers")
-    print("  • GIFs and Animated Media\n")
+
+    if discovery_manifest:
+        media_cands = [c for c in discovery_manifest.candidates if c.category in ("IMAGES", "VIDEOS", "AUDIO / VOICE NOTES", "DOCUMENTS", "OTHER") and not c.is_database]
+        total_media_count = sum(c.message_count for c in media_cands)
+        print(f"Discovered Media Files on {dev_name} ({total_media_count:,} accessible files):")
+        for mc in media_cands:
+            print(f"  • {mc.category:<22} : {mc.message_count:,} files ({mc.filename})")
+        print("")
+    else:
+        print("Supported Media Categories:")
+        print("  • Photos and Images")
+        print("  • Videos")
+        print("  • Audio Files")
+        print("  • Voice Notes")
+        print("  • Documents and Files")
+        print("  • Stickers")
+        print("  • GIFs and Animated Media\n")
 
     if not device or not device.is_accessible:
         print("[!] No accessible Android device connected for media acquisition.")
@@ -2537,6 +2628,7 @@ def recover_media_interactive(
         override_serial=device.serial,
         selected_categories=storage_cats,
         settings=settings,
+        discovery_manifest=discovery_manifest,
     )
 
 
@@ -2544,10 +2636,11 @@ def inspect_backups_and_databases_interactive(
     executor: AdbExecutor,
     device: Optional[DeviceInfo],
     settings: dict[str, Any],
+    discovery_manifest: Optional[DiscoveryManifest] = None,
 ) -> None:
     """Inspect Backups and Databases with RestoreAssistant (Option [5])."""
     print_screen_header("INSPECT BACKUPS & DATABASES", device, settings)
-    print("[*] Scanning local recovery folders and connected device storage...\n")
+    print("[*] Inspecting discovered and accessible database candidates...\n")
 
     local_candidates = RestoreAssistant.scan_local_recovery_candidates("recovery")
     dev_candidates: List[RestoreCandidate] = []
@@ -2558,9 +2651,19 @@ def inspect_backups_and_databases_interactive(
 
     if not all_candidates:
         print("[*] No database or backup candidates found in local recovery or device external storage.")
-        p_in = input("Enter custom database or backup file path to inspect (or press Enter to return): ").strip()
-        if p_in:
-            inspect_target(Path(p_in).resolve(), device_name=device.display_name if device else None)
+        print("\nOptions:")
+        print("  [R] Targeted rescan of database locations")
+        print("  [P] Enter custom database path to inspect")
+        print("  [0] Back to Main Menu\n")
+        act = input("Enter choice [R/P/0]: ").strip().lower()
+        if act == "r":
+            print("\n[*] Performing targeted rescan of database locations...")
+            run_animated_priority_discovery(executor, device, settings)
+            return
+        elif act == "p":
+            p_in = input("Enter custom database or backup file path: ").strip()
+            if p_in:
+                inspect_target(Path(p_in).resolve(), device_name=device.display_name if device else None)
         return
 
     if is_color_enabled() and get_console():
@@ -2581,10 +2684,15 @@ def inspect_backups_and_databases_interactive(
 
     print("\nOptions:")
     print("  [1-N] Inspect candidate details")
+    print("  [R]   Targeted rescan of database locations")
     print("  [0]   Back to Main Menu\n")
 
     pick = input("Enter choice: ").strip()
     if pick == "0" or not pick:
+        return
+    if pick.lower() == "r":
+        print("\n[*] Performing targeted rescan of database locations...")
+        run_animated_priority_discovery(executor, device, settings)
         return
 
     if pick.isdigit() and 1 <= int(pick) <= len(all_candidates):
@@ -2835,29 +2943,23 @@ def settings_and_help_interactive(settings: dict[str, Any]) -> None:
 
 
 def interactive_menu() -> None:
-    """Main terminal menu loop (Phase 4, 10-Option Menu + Exit)."""
+    """Main terminal menu loop with Priority-Based Discovery Workflow."""
     executor = AdbExecutor()
     settings = load_settings()
     active_categories: List[str] = ["All Supported Data"]
 
-    # Preflight Check & Device Detection
+    # 1. Preflight Check & Device Detection
     all_devs, selected_dev = detect_and_display_startup_devices(executor, settings)
 
     if not all_devs:
-        print("[*] No active Android device connected. WRS remains available for offline case inspection,")
-        print("    report export, file verification, and settings.")
-        print("    Press [Enter] to navigate Main Menu, [R] to retry device detection, or [Q] to exit.")
-        try:
-            prompt_act = input("Selection [Enter/R/Q]: ").strip().lower()
-            if prompt_act == "q":
-                print("\nExiting WRS. Goodbye.")
-                sys.exit(0)
-            elif prompt_act == "r":
-                executor.clear_cache()
-                all_devs, selected_dev = detect_and_display_startup_devices(executor, settings)
-        except (KeyboardInterrupt, EOFError):
-            print("\nExiting WRS.")
-            sys.exit(0)
+        print("[*] No active Android device connected. Continuing with offline local recovery discovery")
+        print("    and previously acquired WRS data.\n")
+
+    # 2. Priority-Based Discovery Workflow (Priorities 1 to 5) with Loading Animation
+    discovery_manifest = run_animated_priority_discovery(executor, selected_dev, settings)
+
+    # 3. Discovery Results Review Menu
+    discovery_manifest = discovery_review_menu_interactive(discovery_manifest, executor, selected_dev, settings)
 
     while True:
         # Runtime device & status check
@@ -2909,38 +3011,48 @@ def interactive_menu() -> None:
             print(f"ADB Status      : {adb_status_str}")
             print(f"Scan Status     : {scan_status_str}\n")
             print("MAIN MENU\n")
-            print("[1] Scan and Recover Data")
-            print("[2] Select Specific Data Categories")
-            print("[3] Recover Chat History")
-            print("[4] Recover Media and Attachments")
-            print("[5] Inspect Backups and Databases")
-            print("[6] View Available Chat Dates")
-            print("[7] Export Recovered Data")
-            print("[8] Verify Existing Recovery Files")
-            print("[9] View Previous Scans")
-            print("[10] Settings and Help")
-            print("[0] Exit\n")
+            print("[ 1] Scan and Recover Data")
+            print("     Guided discovery, preview & acquisition wizard\n")
+            print("[ 2] Select Specific Data Categories")
+            print("     Filter chat, media, backup & database targets\n")
+            print("[ 3] Recover Chat History")
+            print("     Reconstruct SQLite messages & timeline\n")
+            print("[ 4] Recover Media and Attachments")
+            print("     Acquire pictures, video, audio & docs\n")
+            print("[ 5] Inspect Backups and Databases")
+            print("     Analyze encrypted & unencrypted databases\n")
+            print("[ 6] View Available Chat Dates")
+            print("     Explore calendar spans of message history\n")
+            print("[ 7] Export Recovered Data")
+            print("     Package artifacts into CSV, JSON, HTML or ZIP\n")
+            print("[ 8] Verify Existing Recovery Files")
+            print("     Evaluate cryptographic SHA-256 integrity\n")
+            print("[ 9] View Previous Scans")
+            print("     Browse previous scan sessions & reports\n")
+            print("[10] Settings and Help\n")
+            print("[ 0] Exit\n")
+            print("=" * 56 + "\n")
 
         try:
             choice = input("Select an option: ").strip()
 
             if choice == "1":
-                recovery_wizard_flow(executor, selected_dev, settings, active_categories)
+                recovery_wizard_flow(executor, selected_dev, settings, active_categories, discovery_manifest=discovery_manifest)
 
             elif choice == "2":
                 active_categories = category_selection_interactive(active_categories)
 
             elif choice == "3":
-                recover_chat_history_interactive(selected_dev, settings, executor=executor)
+                recover_chat_history_interactive(selected_dev, settings, executor=executor, discovery_manifest=discovery_manifest)
 
             elif choice == "4":
-                recover_media_interactive(selected_dev, settings, active_categories)
+                recover_media_interactive(selected_dev, settings, active_categories, discovery_manifest=discovery_manifest)
 
             elif choice == "5":
-                inspect_backups_and_databases_interactive(executor, selected_dev, settings)
+                inspect_backups_and_databases_interactive(executor, selected_dev, settings, discovery_manifest=discovery_manifest)
 
             elif choice == "6":
-                view_available_chat_dates_interactive(selected_dev, settings, executor=executor)
+                view_available_chat_dates_interactive(selected_dev, settings, executor=executor, discovery_manifest=discovery_manifest)
 
             elif choice == "7":
                 export_and_package_menu_interactive(selected_dev)
@@ -2959,9 +3071,11 @@ def interactive_menu() -> None:
                 sys.exit(0)
 
             elif choice == "refresh" or choice.lower() == "r":
-                print("\n[*] Refreshing connected Android devices...")
+                print("\n[*] Refreshing connected Android devices and rerunning priority discovery...")
                 executor.clear_cache()
                 all_devs, selected_dev = detect_and_display_startup_devices(executor, settings)
+                discovery_manifest = run_animated_priority_discovery(executor, selected_dev, settings)
+                discovery_manifest = discovery_review_menu_interactive(discovery_manifest, executor, selected_dev, settings)
 
             else:
                 print("Invalid choice. Please select an option between 0 and 10.")

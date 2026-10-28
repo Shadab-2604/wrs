@@ -258,33 +258,226 @@ Selected Device  : Google Pixel 7
 ==============================================================
 ```
 
-### 10-Option Main Menu
+---
+
+## 7. Priority-Based File Discovery & Guided Workflow
+
+WRS enforces a **priority-based, targeted, permission-aware, and user-controlled** discovery workflow before presenting the main recovery menu. It never blindly traverses the entire phone filesystem or root storage.
+
+### Guided Application Flow
+```text
+                    START WRS
+                        |
+                        v
+              Initialize application
+                        |
+                        v
+              Check ADB and device
+                        |
+                        v
+              Check previous scans
+                        |
+                        v
+             PRIORITY-BASED DISCOVERY
+                        |
+                        v
+             Show loading animation
+                        |
+                        v
+          Discover relevant accessible paths
+                        |
+                        v
+             Display scan summary
+                        |
+                        v
+          Show possible locations found
+                        |
+                        v
+            User reviews the locations
+                        |
+                        v
+        Select locations or continue with
+             the recommended locations
+                        |
+                        v
+              Display MAIN MENU
+                        |
+                        v
+     User selects a recovery or analysis action
+                        |
+                        v
+        Use the existing discovery results
+                        |
+                        v
+           Request confirmation when needed
+                        |
+                        v
+          Execute the selected operation
+```
+
+### Discovery Priorities (Order of Execution)
+
+| Priority | Scope | Inspected Locations | Target File Signatures & Assets |
+| :---: | :--- | :--- | :--- |
+| **Priority 1** | **Existing WRS Results** | `./recovery/`, `database_registry.json`, previous scan catalogs & reports | Validates referenced files on disk. Missing or moved records are marked `stale` / `unavailable`. |
+| **Priority 2** | **WhatsApp Databases & Backups** | `/sdcard/Android/media/com.whatsapp/WhatsApp/Databases/`<br>`/sdcard/WhatsApp/Databases/`<br>`/sdcard/Android/media/com.whatsapp/WhatsApp/Backups/` | `msgstore.db`, `msgstore.db.crypt14`, `msgstore.db.crypt15`, `chatsearch.db`, `wa.db`. |
+| **Priority 3** | **WhatsApp Media Storage** | `/sdcard/Android/media/com.whatsapp/WhatsApp/Media/`<br>`/sdcard/WhatsApp/Media/` | Enumerate verified subdirectories: `WhatsApp Images`, `WhatsApp Video`, `WhatsApp Audio`, `WhatsApp Voice Notes`, `WhatsApp Documents`, `WhatsApp Stickers`. |
+| **Priority 4** | **WhatsApp Business** | `/sdcard/Android/media/com.whatsapp.w4b/WhatsApp/`<br>`/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/` | Discovers WhatsApp Business assets, clearly distinguishing Business data from Standard Messenger. |
+| **Priority 5** | **Configured Search Directories** | User-configured directories in `settings.json` (`storage.local_search_paths`) | Local import directories and external backup folders. |
+| **Priority 6** | **Optional Extended Discovery** | Removable SD cards (`removable_mounts`), `.trash/`, custom folders | User-approved extended scan. Triggered only upon explicit confirmation (`[y/N]`). |
+
+### Loading Animation & Progress Stages
+Discovery displays a live loading animation reflecting real operational stages (with cyan spinner and colored tags when Rich is enabled, and clean plain-text fallback):
+
+```text
+[RUNNING] Checking ADB and device authorization...
+[RUNNING] Loading existing WRS scan manifests...
+[RUNNING] Checking known WhatsApp database locations...
+[RUNNING] Discovering WhatsApp media files...
+[RUNNING] Validating database candidates...
+[RUNNING] Preparing discovery summary...
+[SUCCESS] Discovery completed
+```
+
+- **Non-Hanging Subprocess Timeouts**: All ADB shell inspection commands use strict 5–10s timeouts to prevent hanging on unresponsive devices.
+- **Ctrl+C Safe**: Interrupting discovery cleanly terminates subprocesses, preserves collected records, and marks the manifest as `Cancelled`.
+
+### Discovery Results & Location Summary
+After discovery completes, WRS presents a structured summary of locations actually checked and candidates actually found:
+
+```text
+========================================================
+           WRS — DISCOVERY RESULTS
+========================================================
+
+Device       : Google Pixel 8 (TEST_SERIAL_123)
+Scan status  : Discovery completed
+Duration     : 1.45s
+
+LOCATIONS
+--------------------------------------------------------
+[1] WRS recovery directory
+    Status : Found
+    Files  : 4
+
+[2] WhatsApp database directory
+    Status : Found
+    Files  : 2
+
+[3] WhatsApp media directory
+    Status : Found
+    Files  : 210
+    Subdirs: WhatsApp Images, WhatsApp Video, WhatsApp Documents
+
+[4] WhatsApp Business directory
+    Status : Not Applicable (Not installed or not present)
+    Files  : N/A
+
+--------------------------------------------------------
+Discovered database candidates : 2
+Discovered media files         : 210
+Unreadable candidates          : 1
+Inaccessible locations         : 0
+--------------------------------------------------------
+
+DISCOVERED CANDIDATES
+
+DATABASES
+  [1] msgstore.db — SQLite / Readable (14,200 msgs) [15-01-2024 to 28-10-2026]
+  [2] msgstore.db.crypt14 — CRYPT14 Encrypted Candidate
+
+IMAGES
+  150 matching files
+
+VIDEOS
+  42 matching files
+
+AUDIO / VOICE NOTES
+  0 matching files (checked, none found)
+
+DOCUMENTS
+  18 matching files
+```
+
+### Discovery Review Menu (Next-Action Choices)
+Before entering the main menu, examiners can review and tailor the discovery scope:
+
+```text
+Select Next Action:
+  [1] Use discovered locations and continue
+  [2] Select or deselect specific locations
+  [3] Inspect discovered database candidates
+  [4] Scan additional accessible locations
+  [5] Rescan selected locations
+  [0] Exit
+```
+
+- **[1] Continue**: Proceeds to the Main Menu with the discovery manifest remembered in session memory.
+- **[2] Toggle Locations**: Enables or disables specific discovered directories for subsequent acquisition.
+- **[3] Inspect Database Candidates**: Displays forensic properties (path, format, size, message count, encryption status).
+- **[4] Extended Discovery**: Prompts for consent and scans secondary/removable storage areas.
+- **[5] Rescan**: Re-runs animated discovery across selected locations.
+- **[0] Exit**: Safely closes WRS without modifying evidence.
+
+---
+
+### Required Main Menu (Exact 10 Options)
 
 ```text
 ========================================================
        WRS — WHATSAPP RECOVERY SCANNER
 ========================================================
 
-Selected Device : Google Pixel 7 (2824****06G7)
-ADB Status      : AVAILABLE (version 1.0.41)
-Scan Status     : READY
+[ 1] Scan and Recover Data
+     Guided discovery, preview & acquisition wizard
 
-MAIN MENU
+[ 2] Select Specific Data Categories
+     Filter chat, media, backup & database targets
 
-[1] Scan and Recover Data
-[2] Select Specific Data Categories
-[3] Recover Chat History
-[4] Recover Media and Attachments
-[5] Inspect Backups and Databases
-[6] View Available Chat Dates
-[7] Export Recovered Data
-[8] Verify Existing Recovery Files
-[9] View Previous Scans
+[ 3] Recover Chat History
+     Reconstruct SQLite messages & timeline
+
+[ 4] Recover Media and Attachments
+     Acquire pictures, video, audio & docs
+
+[ 5] Inspect Backups and Databases
+     Analyze encrypted & unencrypted databases
+
+[ 6] View Available Chat Dates
+     Explore calendar spans of message history
+
+[ 7] Export Recovered Data
+     Package artifacts into CSV, JSON, HTML or ZIP
+
+[ 8] Verify Existing Recovery Files
+     Evaluate cryptographic SHA-256 integrity
+
+[ 9] View Previous Scans
+     Browse previous scan sessions & reports
+
 [10] Settings and Help
-[0] Exit
+
+[ 0] Exit
+========================================================
 
 Select an option:
 ```
+
+### Discovery Result Reuse Across Menu Options
+WRS caches discovery results in `recovery/discovery_manifest.json` and session memory:
+- **Option [1] (Scan and Recover Data)**: Uses discovered locations in the acquisition wizard and prevents redundant re-discovery.
+- **Option [3] (Recover Chat History)**: Automatically detects readable SQLite databases from discovery findings. If only encrypted databases exist, it explains that Crypt14/Crypt15 encryption prevents reading without a key and offers targeted rescan or key import.
+- **Option [4] (Recover Media)**: Shows verified counts of discovered media files by category before requesting acquisition confirmation.
+- **Option [5] (Inspect Backups and Databases)**: Presents discovered database candidates directly and allows targeted rescan.
+- **Option [6] (View Available Chat Dates)**: Directly inspects discovered readable databases and extracts true message timestamps without re-scanning.
+- **Option [9] (View Previous Scans)**: Allows browsing discovery manifests alongside acquisition reports.
+
+---
+
+### Bug Fix: Recovery Wizard TypeError (`selected_categories`)
+- **Root Cause**: `run_interactive_workflow()` in `src/wrs/cli.py` originally used parameter name `selected_cats`, while callers in `recovery_wizard_flow()` (Option [1] -> Scan Only & Acquire Files) and `recover_media_interactive()` passed keyword argument `selected_categories`. This triggered `TypeError: run_interactive_workflow() got an unexpected keyword argument 'selected_categories'`.
+- **Fix**: Added `selected_categories: Optional[Set[str]] = None` to `run_interactive_workflow()`, aliasing `selected_cats = selected_categories if selected_categories is not None and selected_cats is None else selected_cats`.
+- **Scan Only Validation**: In `Scan Only` mode (`acquire_mode=False`), WRS executes discovery and inventory without copying or altering source files, accurately filtering the generated inventory and summary report by user-selected categories.
 
 ---
 
