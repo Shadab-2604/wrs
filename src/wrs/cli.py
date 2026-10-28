@@ -122,6 +122,7 @@ from .discovery_wizard import (
     scan_and_recovery_wizard_menu,
     validate_destination_path,
 )
+from .server import RecoveryViewerServer, start_recovery_viewer_server
 
 logger = logging.getLogger("wrs.cli")
 
@@ -3004,6 +3005,50 @@ def settings_and_help_interactive(settings: dict[str, Any]) -> None:
             print("=" * 65 + "\n")
 
 
+def open_recovery_viewer_interactive(
+    executor: AdbExecutor,
+    device: Optional[DeviceInfo],
+    settings: dict[str, Any],
+    discovery_manifest: Optional[DiscoveryManifest] = None,
+    port: Optional[int] = None,
+) -> None:
+    """Launch local single-page HTML Recovery Viewer & Download Center (Option [V])."""
+    rec_root = Path(settings.get("acquisition", {}).get("default_recovery_dir", "recovery")).resolve()
+
+    print("\n" + "=" * 56)
+    print("       WRS — RECOVERY VIEWER & DOWNLOAD CENTER")
+    print("=" * 56)
+    print("[*] Initializing local single-page recovery viewer server...")
+
+    server, thread, url = start_recovery_viewer_server(
+        recovery_root=rec_root,
+        executor=executor,
+        settings=settings,
+        device=device,
+        discovery_manifest=discovery_manifest,
+        port=port,
+        open_browser=True,
+    )
+
+    print(f"[+] Recovery Viewer running locally at:")
+    print(f"    \033[1;36m{url}\033[0m")
+    print(f"\n    • Server binding   : 127.0.0.1 (Strict localhost only)")
+    print(f"    • Active session   : {server.active_session_id}")
+    print(f"    • Indexed files    : {len(server.file_index)} files")
+    print(f"    • Browser launch   : Default browser opened")
+    print("\n[i] Server is running in background. Press Enter or Ctrl+C to stop and return to CLI.")
+
+    try:
+        input("\nPress Enter to stop viewer server: ")
+    except (KeyboardInterrupt, EOFError):
+        pass
+    finally:
+        print("\n[*] Stopping Recovery Viewer server...")
+        server.shutdown()
+        server.server_close()
+        print("[+] Viewer server stopped cleanly.\n")
+
+
 def interactive_menu() -> None:
     """Main terminal menu loop with Priority-Based Discovery Workflow."""
     executor = AdbExecutor()
@@ -3061,6 +3106,7 @@ def interactive_menu() -> None:
                 ("8", "Verify Existing Recovery Files", "Evaluate cryptographic SHA-256 integrity"),
                 ("9", "View Previous Scans", "Browse previous scan sessions & reports"),
                 ("10", "Settings and Help", "Configure ADB, hashing & interface settings"),
+                ("V", "Open Recovery Viewer", "Single-page HTML data preview & download center"),
                 ("0", "Exit", "Close WRS session safely"),
             ]
             for num, title, desc in menu_items:
@@ -3094,6 +3140,8 @@ def interactive_menu() -> None:
             print("[ 9] View Previous Scans")
             print("     Browse previous scan sessions & reports\n")
             print("[10] Settings and Help\n")
+            print("[ V] Open Recovery Viewer")
+            print("     Single-page HTML data preview & download center\n")
             print("[ 0] Exit\n")
             print("=" * 56 + "\n")
 
@@ -3135,6 +3183,14 @@ def interactive_menu() -> None:
 
             elif choice == "10":
                 settings_and_help_interactive(settings)
+
+            elif choice.lower() in ("v", "viewer", "11"):
+                open_recovery_viewer_interactive(
+                    executor=executor,
+                    device=selected_dev,
+                    settings=settings,
+                    discovery_manifest=discovery_manifest,
+                )
 
             elif choice == "0" or choice.lower() in ("exit", "quit", "q"):
                 print("\nExiting WRS. Goodbye.")
@@ -3184,13 +3240,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--categories", type=str, default=None, help="Comma-separated category filter (e.g. Images,Videos,Databases)")
     parser.add_argument("--exclude-duplicates", action="store_true", help="Exclude duplicate candidate files from acquisition")
     parser.add_argument("--scan-id", type=str, default=None, help="Specific scan ID for logging or tracking")
-    parser.add_argument(
-        "--unattended",
-        "--yes",
-        action="store_true",
-        help="Run without interactive confirmation prompts (requires explicit --acquire and scope)",
-    )
+    parser.add_argument("--unattended", "--yes", action="store_true", help="Run without interactive confirmation prompts")
     parser.add_argument("--dry-run", action="store_true", help="Simulate acquisition inventory without copying files")
+    parser.add_argument("--viewer", action="store_true", help="Launch local single-page HTML recovery viewer")
+    parser.add_argument("--port", type=int, default=None, help="Port for recovery viewer (default: auto)")
     parser.add_argument(
         "--no-color",
         action="store_true",
@@ -3219,6 +3272,17 @@ def main() -> None:
     executor = AdbExecutor()
     settings = load_settings()
     key_path = Path(args.key).resolve() if args.key else None
+
+    # Standalone Recovery Viewer mode
+    if args.viewer:
+        all_devs, selected_dev = detect_and_display_startup_devices(executor, settings)
+        open_recovery_viewer_interactive(
+            executor=executor,
+            device=selected_dev,
+            settings=settings,
+            port=args.port,
+        )
+        return
 
     # 1. Standalone verification mode
     if args.verify:

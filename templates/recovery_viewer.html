@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WRS — Recovery Viewer</title>
+  <link rel="stylesheet" href="/static/css/viewer.css">
+</head>
+<body>
+
+  <!-- Main Application Header -->
+  <header class="app-header">
+    <div class="brand-section">
+      <span class="brand-badge">WRS</span>
+      <div>
+        <h1 class="brand-title">WRS — Recovery Viewer</h1>
+        <div class="brand-subtitle">Local Data Preview, Analysis &amp; Acquisition</div>
+      </div>
+    </div>
+
+    <div class="header-meta">
+      <div class="meta-pill" id="devicePill">
+        Device: <strong>Detecting...</strong>
+      </div>
+      <div class="meta-pill connected" id="connectionStatusPill">
+        <span class="status-dot"></span> <span>Checking status...</span>
+      </div>
+      <div>
+        <select class="session-selector" id="sessionSelect" aria-label="Select Recovery Session">
+          <option value="">Loading sessions...</option>
+        </select>
+      </div>
+    </div>
+  </header>
+
+  <!-- Navigation Tabs -->
+  <nav class="nav-tabs" id="navTabs" aria-label="Recovery Categories">
+    <button class="tab-btn active" data-tab="overview">
+      <span>📊</span> Overview
+    </button>
+    <button class="tab-btn" data-tab="images">
+      <span>🖼️</span> Images <span class="tab-badge" id="badgeImages">0</span>
+    </button>
+    <button class="tab-btn" data-tab="videos">
+      <span>🎬</span> Videos <span class="tab-badge" id="badgeVideos">0</span>
+    </button>
+    <button class="tab-btn" data-tab="audio">
+      <span>🎵</span> Audio <span class="tab-badge" id="badgeAudio">0</span>
+    </button>
+    <button class="tab-btn" data-tab="documents">
+      <span>📑</span> Documents <span class="tab-badge" id="badgeDocs">0</span>
+    </button>
+    <button class="tab-btn" data-tab="databases">
+      <span>🗄️</span> Chats &amp; Databases <span class="tab-badge" id="badgeDatabases">0</span>
+    </button>
+    <button class="tab-btn" data-tab="all">
+      <span>📁</span> All Files <span class="tab-badge" id="badgeAll">0</span>
+    </button>
+  </nav>
+
+  <!-- Main Container -->
+  <main class="main-content">
+
+    <!-- Tab 1: Overview Dashboard -->
+    <section id="tabOverview">
+      <!-- Top Metrics Cards -->
+      <div class="metrics-grid" id="overviewMetricsGrid">
+        <!-- Rendered dynamically -->
+      </div>
+
+      <!-- Forensic Classification Guidance -->
+      <div class="classification-box">
+        <div class="classification-title">
+          <span>🛡️</span> Forensic Integrity &amp; File Status Distinctions
+        </div>
+        <div class="classification-grid">
+          <div class="class-item">
+            <strong>Discovered</strong>
+            <p>Matching candidate artifact located in device filesystem or recovery catalog.</p>
+          </div>
+          <div class="class-item">
+            <strong>Accessible</strong>
+            <p>Current device connection or workstation permissions permit reading or copying.</p>
+          </div>
+          <div class="class-item">
+            <strong>Acquired</strong>
+            <p>File has been safely transferred and preserved in the local recovery case directory.</p>
+          </div>
+          <div class="class-item">
+            <strong>Previewable</strong>
+            <p>Decodable natively in browser (JPEG, PNG, WebP, MP4, Audio, PDF, Text, SQLite).</p>
+          </div>
+          <div class="class-item">
+            <strong>Verified</strong>
+            <p>Cryptographic SHA-256 integrity hash calculated and cross-verified against manifest.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Session Provenance Box -->
+      <div class="classification-box" id="overviewSessionProvenance">
+        <!-- Rendered dynamically -->
+      </div>
+    </section>
+
+    <!-- Tab 2: Gallery & File List View -->
+    <section id="tabGallery" style="display: none;">
+      <!-- Search & Filters Toolbar -->
+      <div class="toolbar-panel">
+        <div class="search-box">
+          <span class="search-icon">🔍</span>
+          <input type="text" class="search-input" id="searchInput" placeholder="Search by filename or path...">
+        </div>
+
+        <div class="filter-group">
+          <select class="filter-select" id="categoryFilter" aria-label="Category Filter">
+            <option value="all">All Categories</option>
+            <option value="Images">Images</option>
+            <option value="Videos">Videos</option>
+            <option value="Audio">Audio &amp; Voice Notes</option>
+            <option value="Documents">Documents</option>
+            <option value="Databases">Databases &amp; Backups</option>
+          </select>
+
+          <select class="filter-select" id="statusFilter" aria-label="Status Filter">
+            <option value="all">All Statuses</option>
+            <option value="acquired">Acquired Locally</option>
+            <option value="discovered">Discovered on Device</option>
+            <option value="verified">Integrity Verified</option>
+            <option value="encrypted">Encrypted Containers</option>
+            <option value="readable">Readable Databases</option>
+            <option value="failed">Failed Transfers</option>
+          </select>
+
+          <select class="filter-select" id="sortSelect" aria-label="Sort Files">
+            <option value="name_asc">Name (A–Z)</option>
+            <option value="name_desc">Name (Z–A)</option>
+            <option value="size_desc">Size (Largest)</option>
+            <option value="size_asc">Size (Smallest)</option>
+            <option value="time_desc">Modified (Newest)</option>
+          </select>
+
+          <button class="action-btn" id="selectAllBtn">Select Visible</button>
+          <button class="action-btn" id="clearFilterBtn">Clear Filters</button>
+        </div>
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <h2 id="galleryTitle" style="font-size: 1.1rem; font-weight: 600; color: var(--text-primary);">Files</h2>
+      </div>
+
+      <!-- File Cards Grid -->
+      <div class="gallery-grid" id="galleryGrid">
+        <!-- Rendered dynamically -->
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Persistent Floating Selection Action Bar -->
+  <aside class="floating-bar" id="floatingBar" aria-label="Batch Actions">
+    <div class="selection-info" id="selectionCountLabel">Selected: 0 files</div>
+    <button class="action-btn primary" id="downloadSelectedBtn">
+      <span>⬇</span> Download Selected (ZIP)
+    </button>
+    <button class="action-btn success" id="downloadAllBtn">
+      <span>📦</span> Download All Eligible (ZIP)
+    </button>
+    <button class="action-btn" id="clearSelectionBtn">
+      <span>✕</span> Clear
+    </button>
+  </aside>
+
+  <!-- Universal Preview Modal -->
+  <div class="modal-overlay" id="previewModal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 class="modal-title" id="modalTitle">Preview</h3>
+        <button class="modal-close-btn" id="modalCloseBtn" aria-label="Close Preview">&times;</button>
+      </div>
+      <div class="modal-body" id="modalBody">
+        <!-- Dynamic preview content injected here -->
+      </div>
+      <div class="modal-footer">
+        <a class="action-btn primary" id="modalDownloadBtn" href="#" download>
+          <span>⬇</span> Download File
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script src="/static/js/viewer.js"></script>
+</body>
+</html>

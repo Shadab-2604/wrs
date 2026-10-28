@@ -598,6 +598,9 @@ Select Next Action:
 
 [10] Settings and Help
 
+[ V] Open Recovery Viewer
+     Single-page HTML data preview & download center
+
 [ 0] Exit
 ========================================================
 
@@ -1030,6 +1033,48 @@ Newest date  : 28-10-2026 11:30
 **Purpose:** Persistent configuration editor (`config/settings.json`), plus comprehensive guides for:
 - Supported storage locations and forensic boundaries.
 - Native WhatsApp restoration prerequisites and rollback safeguards.
+
+---
+
+### Option [V]: Single-Page HTML Recovery Viewer & File Download Center
+**Purpose:** Launches a modern, local-only web interface for reviewing discovered and acquired WhatsApp-related files, streaming media previews, inspecting database schemas/chat messages, and downloading individual or bulk ZIP archives.
+
+#### Launching the Recovery Viewer on Kali Linux:
+- **Interactive CLI Menu**: Select `[V]` or `[11]` from the WRS main menu.
+- **Standalone Command Line**:
+  ```bash
+  python3 wrs.py --viewer
+  ```
+- **Custom Port Selection**:
+  ```bash
+  python3 wrs.py --viewer --port 8080
+  ```
+
+#### Security Architecture:
+- **Strict Localhost Binding**: The backend HTTP server binds exclusively to `127.0.0.1`. It is never exposed to the public internet or local area network.
+- **Zero External Dependencies**: Operates 100% offline with no external CDN scripts, remote fonts, telemetry, or third-party web services.
+- **Content Security Policy**: Enforces strict CSP (`default-src 'self'`), `X-Content-Type-Options: nosniff`, and `X-Frame-Options: DENY`.
+- **Safe Opaque Identifiers**: Files are referenced by opaque tokens (`f_1`, `f_2`) mapped on the server. Client requests cannot supply arbitrary raw filesystem paths.
+- **Path Traversal Protection**: All filesystem access is strictly bounded to the project recovery directory and temporary staging folders.
+- **No Automatic Scan**: Opening the viewer inspects existing sessions without initiating unsolicited scans on connected Android devices.
+
+#### Supported In-Browser Previews:
+- **Images**: High-resolution zoom and aspect-ratio-preserving preview for JPEG, PNG, GIF, WebP, and BMP attachments. Features Previous/Next image navigation.
+- **Audio & Voice Notes**: HTML5 `<audio>` player with play/pause, seek bar, and volume controls for WhatsApp Opus, M4A, MP3, and WAV voice notes.
+- **Videos**: HTML5 `<video>` player with HTTP Range header support (`206 Partial Content`) for seekable streaming of MP4, 3GP, and WebM videos.
+- **Documents**:
+  - Sanitized text viewer for `.txt`, `.csv`, `.json`, `.log`, and `.md` files with XSS escaping.
+  - Native browser embedding and "Open in New Tab" for `.pdf` documents.
+  - Metadata overview and direct download for Office (`.docx`, `.xlsx`, `.pptx`) and binary artifacts.
+- **Chats & Databases**:
+  - Unencrypted SQLite databases: inspect table catalogs, calculate message counts, view message timestamps, and explore sample message records.
+  - Encrypted WhatsApp databases (`.crypt14`/`.crypt15`): displays format version and legitimate key availability status without revealing secret keys.
+
+#### File Download Options:
+1. **Individual File Download**: Download any accessible local file directly with sanitized attachment headers.
+2. **On-Demand Remote Acquisition**: When a candidate file resides on the connected phone, WRS safely pulls it via ADB to a local staging directory before delivery.
+3. **Download Selected Files (ZIP)**: Multi-select individual files or all visible filtered items. Packages them into a ZIP archive containing a structured `archive_manifest.json` and collision-safe file paths (e.g., `images/photo_1.jpg`).
+4. **Download All Eligible Files (ZIP)**: Packages all accessible files in the active session or selected category with atomic writing and space pre-checks.
 
 ---
 
